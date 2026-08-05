@@ -6,78 +6,69 @@ from google import genai
 from google.genai import types
 
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
+_raw_keys = os.getenv("GEMINI_API_KEY")
+if not _raw_keys:
     raise RuntimeError("GEMINI_API_KEY not set — add it to your .env file")
+GEMINI_API_KEYS = [k.strip() for k in _raw_keys.split(",") if k.strip()]
+if not GEMINI_API_KEYS:
+    raise RuntimeError("No valid keys found in GEMINI_API_KEY")
 
 SYSTEM_INSTRUCTIONS="""
 
 You are a precise data-extraction assistant.
-You are given an image of a single PDF page from an Indian competitive exam study book 
+You are given an image of a single PDF page from an Indian competitive exam study book.
 
-Extract ALL questions and answers present on the page and return them ONLY as raw CSV (comma-separated values). No extra text
+Extract ALL questions, answers, and chapters present on the page and return them ONLY as JSON arrays. No extra text, no markdown fences (like ```json).
 
 Rules:
-You need to have 3 sections in the CSV: one for questions , one for answers and one chapters section all separated by ---++---.  The question section comes first, followed by the answer section and the chapter section.  Each section has its own header row.
+You need to output exactly 3 JSON arrays separated by ---++---.
+The first array is for questions, followed by ---++---, then an array for answers, followed by ---++---, then an array for chapters.
 
-1. The FIRST line must be EXACTLY this header (13 columns):
-   type,ocr_page,question_no,question,instruction,optionA,optionB,optionC,optionD,has_images
-2. Each subsequent line is one data row with exactly 13 comma-separated values.
-3. "type" must be one of:  question | answer
-4. For a QUESTION row fill: type, ocr_page, question_no, question,instruction, optionA, optionB, optionC, optionD, has_images.
-    type: question
-    ocr_page: the page number as printed in the book (may differ from PDF page order)
-    question_no: the question number (1, 2, 3, ...)
-    question: Must be simple Markdown to account for underlines, bold highlighted words etc. the self-contained standalone verbatim of the question containing the sentence/word/context
-    instruction: any explicit instruction text shown on the page (optional)
-    optionA/B/C/D: the four answer options, ALL OPTIONS MUST BE ENCLOSED IN DOUBLE-QUOTES.  Escape any internal double-quotes by doubling them. Only option text, dont include numbering 
-    has_images: true/false – whether visuals exist on this item
-    Leave instruction empty unless explicitly shown. Leave correct_option, correct_option_text, explanation empty.
+1. The FIRST array (QUESTIONS) must start with exactly this header array:
+   ["type", "ocr_page", "question_no", "question", "instruction", "optionA", "optionB", "optionC", "optionD", "has_images"]
+   - Each subsequent element is a data array with exactly 10 values.
+   - "type": "question"
+   - "ocr_page": the page number as printed in the book
+   - "question_no": the question number (1, 2, 3, ...)
+   - "question": the self-contained verbatim question text. Use Markdown for underlines/bold.
+   - "instruction": any explicit instruction text shown (optional)
+   - "optionA", "optionB", "optionC", "optionD": the four answer options (only the text, no numbering)
+   - "has_images": true/false
+   Leave other fields empty if not present.
 
-ONCE ALL QUESTIONS ARE EXTRACTED, THEN EXTRACT ALL ANSWERS
-ADD A SEPARATOR ---++--- before the first answer row.  This is to help distinguish between question and answer rows.
+2. The SECOND array (ANSWERS) must start with exactly this header array:
+   ["type", "ocr_page", "question_no", "has_images", "correct_option", "correct_option_text", "explanation"]
+   - "type": "answer"
+   - "correct_option": A/B/C/D or 1/2/3/4
+   - "correct_option_text": the text of the correct option
+   - "explanation": step-by-step solution text verbatim. Use Markdown for underlines/bold.
 
-5. For an ANSWER section wull have the headers: 
-type,ocr_page,question_no,has_images,correct_option,correct_option_text,explanation
-each answer row will have the following fields:
-    type: answer
-    question_no: the question number (1, 2, 3, ...)
-    has_images: true/false – whether visuals exist on this item
-    correct_option: A/B/C/D or 1/2/3/4 depending on the option numbering
-    correct_option_text: the text of the correct option (e.g. \"42\" or \"Agra\") if available, else leave empty
-    explanation: the step-by-step solution text verbatim if available, else leave empty.  Must be Markdown to account for underlines, bold highlighted words etc
+3. The THIRD array (CHAPTERS) must start with exactly this header array:
+   ["type", "ocr_page", "chapter_no", "chapter_name"]
+   - "type": "chapter"
+   - "chapter_no": the chapter number if available
+   - "chapter_name": the name of the chapter (look for large bold font)
 
-   Leave question, instruction, optionA, optionB, optionC, optionD ALL empty.
-6. ocr_page = the page number as PRINTED/VISIBLE on the image
-7. If a field value contains a comma, newline, or double-quote, wrap the entire field in double-quotes and escape internal double-quotes by doubling them (\"\").
-8. Do NOT output anything outside the CSV - no fences, no explanations, no prose.
-9. A single page may have both question AND answer. question row and answer row separately
-10. If the page is blank, a cover, a table of contents, or contains no questions/answers, output only the header line.
-
-
-ONCE ALL ANSWERS ARE EXTRACTED, THEN EXTRACT ALL Chapter names
-ADD A SEPARATOR ---++--- before the first chapter row. This is a best effort attempt to extract chapter names.  If no chapter name is present, leave the chapter_no and chapter_name empty.
-
-11. For a CHAPTER section, use the headers:
-type,ocr_page,chapter_no,chapter_name
-each chapter row will have the following fields:
-    type: chapter
-    chapter_no: the chapter number if available
-    chapter_name: the name of the chapter
-
-For Chapter section (look for chapter name in a big and bold font) (Optional)
-In case no chapter is present on the page, output only the header line. 
-the header is: type,ocr_page,chapter_no,chapter_name
-type: chapter
-ocr_page = the page number as PRINTED/VISIBLE on the image
-chapter_no: the chapter number as printed in the book, in case no chapter number is printed alongside the chapter name, leave it empty
-chapter_name: the chapter name as printed in the book, in case no chapter name is printed
+If a section has no data, output only the header array inside the main array.
+Example structure:
+[
+  ["type", "ocr_page", "question_no", "question", "instruction", "optionA", "optionB", "optionC", "optionD", "has_images"],
+  ["question", 1, 1, "What is X?", "", "A", "B", "C", "D", false]
+]
+---++---
+[
+  ["type", "ocr_page", "question_no", "has_images", "correct_option", "correct_option_text", "explanation"],
+  ["answer", 1, 1, false, "B", "B", "Explanation here"]
+]
+---++---
+[
+  ["type", "ocr_page", "chapter_no", "chapter_name"]
+]
 
 MANDATORY INSTRUCTIONS:
-- only question and explanation text should be in Markdown. All other fields should be plain text.
-- If a field has one or more commas (,) then whole field must be wrapped in double quotes (") and any internal double quotes must be escaped by doubling them ("").
-- YOUR OUTPUT MUST BE A CSV IN GIVEN FORMAT
-- Donot add extra spaces with separators or commas.  Only the required number of commas for the number of columns.
+- Do NOT output anything outside the JSON arrays and delimiters - no explanations, no prose.
+- Do NOT wrap your output in ```json or any other markdown code block format.
+- Output MUST be valid JSON (use double quotes for strings, no trailing commas).
 """
 
 
@@ -114,9 +105,11 @@ def generate(image_path: str, debug: bool = False, progress_cb=None) -> str:
                      When provided, generate() stays completely silent.
     """
     import time
+    import random
 
+    api_key = random.choice(GEMINI_API_KEYS)
     client = genai.Client(
-        api_key=GEMINI_API_KEY,
+        api_key=api_key,
     )
 
     image_bytes = pathlib.Path(image_path).read_bytes()
@@ -182,20 +175,40 @@ def generate(image_path: str, debug: bool = False, progress_cb=None) -> str:
 DELIMITER = "---++---"
 
 
-def _append_csv(csv_text: str, output_path: str):
-    """Append CSV block to a file, writing the header only on first write."""
-    lines = csv_text.strip().splitlines()
-    if not lines:
+def _append_json_to_csv(json_text: str, output_path: str):
+    """Parse JSON array of arrays and append to CSV securely using python's csv module."""
+    import json, csv
+    json_text = json_text.strip()
+    if json_text.startswith("```json"):
+        json_text = json_text[7:]
+    if json_text.startswith("```"):
+        json_text = json_text[3:]
+    if json_text.endswith("```"):
+        json_text = json_text[:-3]
+    json_text = json_text.strip()
+
+    if not json_text:
         return
+    try:
+        rows = json.loads(json_text)
+    except json.JSONDecodeError as e:
+        print(f"JSONDecodeError: {e} \nContent: {json_text}")
+        return
+
+    if not isinstance(rows, list) or not rows:
+        return
+
     file_exists = os.path.exists(output_path)
     with open(output_path, "a", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
         if not file_exists:
-            f.write("\n".join(lines) + "\n")
+            # write header + all rows
+            writer.writerows(rows)
         else:
-            data_rows = lines[1:]   # skip repeated header
+            # skip header
+            data_rows = rows[1:] if len(rows) > 1 else []
             if data_rows:
-                f.write("\n".join(data_rows) + "\n")
-
+                writer.writerows(data_rows)
 
 def _append_raw(raw_text: str, page_num: int, raw_path: str):
     """Append one row (page_num, raw_output) to the audit raw CSV."""
@@ -223,9 +236,9 @@ def split_and_save_csv(
     questions_block = parts[0] if len(parts) > 0 else ""
     answers_block   = parts[1] if len(parts) > 1 else ""
     chapters_block  = parts[2] if len(parts) > 2 else ""
-    _append_csv(questions_block, questions_path)
-    _append_csv(answers_block,   answers_path)
-    _append_csv(chapters_block,  chapters_path)
+    _append_json_to_csv(questions_block, questions_path)
+    _append_json_to_csv(answers_block,   answers_path)
+    _append_json_to_csv(chapters_block,  chapters_path)
     if raw_path and page_num is not None:
         _append_raw(raw_text, page_num, raw_path)
 
