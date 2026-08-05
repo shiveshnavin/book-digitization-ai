@@ -1,11 +1,15 @@
 import os
 import pathlib
 import argparse
-import tempfile
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-GEMINI_API_KEY="AIzaSyD_-yRJ4ffviMhoGoNf6dPh10wMu6inxIM"
+load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY not set — add it to your .env file")
+
 SYSTEM_INSTRUCTIONS="""
 
 You are a precise data-extraction assistant.
@@ -55,6 +59,7 @@ MANDATORY INSTRUCTIONS:
 - only question and explanation text should be in Markdown. All other fields should be plain text.
 - If a field has one or more commas (,) then whole field must be wrapped in double quotes (") and any internal double quotes must be escaped by doubling them ("").
 - YOUR OUTPUT MUST BE A CSV IN GIVEN FORMAT
+- Donot add extra spaces with separators or commas.  Only the required number of commas for the number of columns.
 """
 
 

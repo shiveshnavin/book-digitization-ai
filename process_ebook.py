@@ -118,11 +118,13 @@ def process_page(
         return page_num, True
 
     except Exception as exc:
-        _set(f"✗ failed — {exc}")
+        err_msg = str(exc)
+        _set(f"✗ failed — {err_msg}")
 
         with _index_lock:
-            if page_num not in index["failed"]:
-                index["failed"].append(page_num)
+            failed_pages = [e["page"] for e in index["failed"]]
+            if page_num not in failed_pages:
+                index["failed"].append({"page": page_num, "error": err_msg})
             _write_index(index_path, index)
 
         return page_num, False
@@ -177,7 +179,7 @@ if __name__ == "__main__":
     # ── Load index & determine page range ─────────────────────────────────────
     index         = load_index(index_path)
     completed_set = set(index["completed"])
-    failed_set    = set(index["failed"])
+    failed_set    = {e["page"] for e in index["failed"]}
 
     total_pages = get_total_pages(str(pdf_path))
     end_page    = min(
@@ -239,7 +241,9 @@ if __name__ == "__main__":
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n[process_ebook] Finished — ✓ {done_count} succeeded  ✗ {failed_count} failed")
     if index["failed"]:
-        print(f"[process_ebook] Failed pages : {sorted(index['failed'])}")
+        print(f"[process_ebook] Failed pages :")
+        for entry in sorted(index["failed"], key=lambda e: e["page"]):
+            print(f"                  page {entry['page']:>4} — {entry['error']}")
         print(f"[process_ebook] Re-run same command to retry failed pages.")
     print(f"[process_ebook] Questions → {questions_csv}")
     print(f"[process_ebook] Answers   → {answers_csv}")
