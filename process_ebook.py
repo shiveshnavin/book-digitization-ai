@@ -1,0 +1,245 @@
+import os
+import sys
+import json
+import pathlib
+import argparse
+import threading
+from queue import Queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Allow importing extract_page from the same directory
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+from extract_page import pdf_page_to_jpg, generate, split_and_save_csv
+
+# ── Locks ─────────────────────────────────────────────────────────────────────
+_csv_lock   = threading.Lock()
+_index_lock = threading.Lock()
+
+
+# ── Multi-line slot display ───────────────────────────────────────────────────
+
+class SlotDisplay:
+    """Reserves N terminal lines — one per parallel worker — and updates each
+    in-place using ANSI escape codes so lines never collide."""
+
+    def __init__(self, n_slots: int):
+        self.n = n_slots
+        self._lock = threading.Lock()
+        # Reserve lines up front
+        sys.stdout.write("\n" * n_slots)
+        sys.stdout.flush()
+
+    def update(self, slot: int, text: str):
+        """Overwrite the line reserved for `slot` (0-indexed from top)."""
+        with self._lock:
+            up = self.n - slot
+            # move up → clear line → write → move back down
+            sys.stdout.write(f"\x1b[{up}A\r\x1b[2K{text}\x1b[{up}B\r")
+            sys.stdout.flush()
+
+    def println(self, text: str):
+        """Print a persistent line ABOVE the slot area (e.g. summary lines)."""
+        with self._lock:
+            # move above all slots, insert line, return
+            sys.stdout.write(f"\x1b[{self.n}A\x1b[L{text}\n\x1b[{self.n}B\r")
+            sys.stdout.flush()
+
+    def teardown(self):
+        """Move cursor past the reserved area so the shell prompt appears below."""
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
+# ── Index helpers ─────────────────────────────────────────────────────────────
+
+def load_index(index_path: str) -> dict:
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"completed": [], "failed": []}
+
+
+def _write_index(index_path: str, index: dict):
+    """Write index to disk — caller must hold _index_lock."""
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2)
+
+
+# ── Page worker ───────────────────────────────────────────────────────────────
+
+def process_page(
+    pdf_path:      str,
+    page_num:      int,
+    questions_csv: str,
+    answers_csv:   str,
+    raw_csv:       str,
+    index_path:    str,
+    index:         dict,
+    debug:         bool,
+    parallel:      int,
+    slot:          int,
+    display:       SlotDisplay,
+) -> tuple[int, bool]:
+
+    tag = f"[page {page_num:>4}]"
+
+    def _set(text: str):
+        display.update(slot, f"{tag} {text}")
+
+    _elapsed = [0.0]  # mutable container to capture final elapsed
+
+    def progress_cb(chars, cps, elapsed, done=False):
+        _elapsed[0] = elapsed
+        _set(f"{chars} chars | {cps:.1f} ch/s | {elapsed:.1f}s")
+
+    _set("starting…")
+    jpg_path = None
+    try:
+        jpg_path = pdf_page_to_jpg(pdf_path, page_num)
+
+        use_cb    = parallel > 1          # slot display for parallel
+        use_debug = debug and parallel == 1  # raw stream only when single
+
+        csv_text = generate(
+            jpg_path,
+            debug=use_debug,
+            progress_cb=progress_cb if use_cb else None,
+        )
+
+        with _csv_lock:
+            split_and_save_csv(csv_text, questions_csv, answers_csv, raw_csv, page_num)
+
+        with _index_lock:
+            if page_num not in index["completed"]:
+                index["completed"].append(page_num)
+            _write_index(index_path, index)
+
+        _set(f"✓ done in {_elapsed[0]:.1f}s")
+        return page_num, True
+
+    except Exception as exc:
+        _set(f"✗ failed — {exc}")
+
+        with _index_lock:
+            if page_num not in index["failed"]:
+                index["failed"].append(page_num)
+            _write_index(index_path, index)
+
+        return page_num, False
+
+    finally:
+        if jpg_path and os.path.exists(jpg_path):
+            os.remove(jpg_path)
+
+
+# ── PDF page count ────────────────────────────────────────────────────────────
+
+def get_total_pages(pdf_path: str) -> int:
+    from pdf2image import pdfinfo_from_path
+    info = pdfinfo_from_path(pdf_path)
+    return info["Pages"]
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Process a PDF ebook page-by-page using extract_page.py"
+    )
+    parser.add_argument("pdf", help="Path to the PDF file")
+    parser.add_argument(
+        "--start", type=int, default=1,
+        help="First page to process (1-indexed, default: 1)",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Maximum number of pages to process (default: all remaining)",
+    )
+    parser.add_argument(
+        "--parallel", type=int, default=1,
+        help="Number of concurrent workers (default: 1)",
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Stream raw model output — only clean with --parallel 1",
+    )
+    args = parser.parse_args()
+
+    pdf_path = pathlib.Path(args.pdf).resolve()
+    pdf_dir  = pdf_path.parent
+    pdf_stem = pdf_path.stem
+
+    questions_csv = str(pdf_dir / f"{pdf_stem}_questions.csv")
+    answers_csv   = str(pdf_dir / f"{pdf_stem}_answers.csv")
+    raw_csv       = str(pdf_dir / f"{pdf_stem}_raw.csv")
+    index_path    = str(pdf_dir / f"{pdf_stem}_index.json")
+
+    # ── Load index & determine page range ─────────────────────────────────────
+    index         = load_index(index_path)
+    completed_set = set(index["completed"])
+    failed_set    = set(index["failed"])
+
+    total_pages = get_total_pages(str(pdf_path))
+    end_page    = min(
+        args.start + args.limit - 1 if args.limit else total_pages,
+        total_pages,
+    )
+
+    pages_to_process = [
+        p for p in range(args.start, end_page + 1)
+        if p not in completed_set
+    ]
+    skipped = (end_page - args.start + 1) - len(pages_to_process)
+
+    print(f"[process_ebook] PDF      : {pdf_path.name}")
+    print(f"[process_ebook] Pages    : {args.start}–{end_page}  ({total_pages} total in PDF)")
+    print(f"[process_ebook] To do    : {len(pages_to_process)}  |  Skipped (done): {skipped}  |  Previously failed: {len(failed_set)}")
+    print(f"[process_ebook] Questions : {questions_csv}")
+    print(f"[process_ebook] Answers   : {answers_csv}")
+    print(f"[process_ebook] Raw audit : {raw_csv}")
+    print(f"[process_ebook] Index     : {index_path}")
+    print(f"[process_ebook] Workers  : {args.parallel}")
+
+    if not pages_to_process:
+        print("\n[process_ebook] Nothing left to do. All pages already completed.")
+        sys.exit(0)
+
+    # ── Slot pool — each worker borrows a slot index while it runs ────────────
+    slot_pool = Queue()
+    for i in range(args.parallel):
+        slot_pool.put(i)
+
+    display = SlotDisplay(args.parallel)
+
+    done_count   = 0
+    failed_count = 0
+
+    def run_page(page_num: int) -> tuple[int, bool]:
+        slot = slot_pool.get()
+        try:
+            return process_page(
+                str(pdf_path), page_num, questions_csv, answers_csv, raw_csv,
+                index_path, index, args.debug, args.parallel, slot, display,
+            )
+        finally:
+            slot_pool.put(slot)
+
+    try:
+        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+            futures = {executor.submit(run_page, p): p for p in pages_to_process}
+            for future in as_completed(futures):
+                _, success = future.result()
+                if success:
+                    done_count += 1
+                else:
+                    failed_count += 1
+    finally:
+        display.teardown()
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print(f"\n[process_ebook] Finished — ✓ {done_count} succeeded  ✗ {failed_count} failed")
+    if index["failed"]:
+        print(f"[process_ebook] Failed pages : {sorted(index['failed'])}")
+        print(f"[process_ebook] Re-run same command to retry failed pages.")
+    print(f"[process_ebook] Questions → {questions_csv}")
+    print(f"[process_ebook] Answers   → {answers_csv}")
