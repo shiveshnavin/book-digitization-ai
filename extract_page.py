@@ -18,7 +18,7 @@ You are given an image of a single PDF page from an Indian competitive exam stud
 Extract ALL questions and answers present on the page and return them ONLY as raw CSV (comma-separated values). No extra text
 
 Rules:
-You need to have 2 sections in the CSV: one for questions and one for answers separated by ---++---.  The question section comes first, followed by the answer section.  Each section has its own header row.
+You need to have 3 sections in the CSV: one for questions , one for answers and one chapters section all separated by ---++---.  The question section comes first, followed by the answer section and the chapter section.  Each section has its own header row.
 
 1. The FIRST line must be EXACTLY this header (13 columns):
    type,ocr_page,question_no,question,instruction,optionA,optionB,optionC,optionD,has_images
@@ -33,6 +33,7 @@ You need to have 2 sections in the CSV: one for questions and one for answers se
     optionA/B/C/D: the four answer options, ALL OPTIONS MUST BE ENCLOSED IN DOUBLE-QUOTES.  Escape any internal double-quotes by doubling them. Only option text, dont include numbering 
     has_images: true/false – whether visuals exist on this item
     Leave instruction empty unless explicitly shown. Leave correct_option, correct_option_text, explanation empty.
+
 ONCE ALL QUESTIONS ARE EXTRACTED, THEN EXTRACT ALL ANSWERS
 ADD A SEPARATOR ---++--- before the first answer row.  This is to help distinguish between question and answer rows.
 
@@ -54,6 +55,23 @@ each answer row will have the following fields:
 10. If the page is blank, a cover, a table of contents, or contains no questions/answers, output only the header line.
 
 
+ONCE ALL ANSWERS ARE EXTRACTED, THEN EXTRACT ALL Chapter names
+ADD A SEPARATOR ---++--- before the first chapter row. This is a best effort attempt to extract chapter names.  If no chapter name is present, leave the chapter_no and chapter_name empty.
+
+11. For a CHAPTER section, use the headers:
+type,ocr_page,chapter_no,chapter_name
+each chapter row will have the following fields:
+    type: chapter
+    chapter_no: the chapter number if available
+    chapter_name: the name of the chapter
+
+For Chapter section (look for chapter name in a big and bold font) (Optional)
+In case no chapter is present on the page, output only the header line. 
+the header is: type,ocr_page,chapter_no,chapter_name
+type: chapter
+ocr_page = the page number as PRINTED/VISIBLE on the image
+chapter_no: the chapter number as printed in the book, in case no chapter number is printed alongside the chapter name, leave it empty
+chapter_name: the chapter name as printed in the book, in case no chapter name is printed
 
 MANDATORY INSTRUCTIONS:
 - only question and explanation text should be in Markdown. All other fields should be plain text.
@@ -194,17 +212,20 @@ def split_and_save_csv(
     raw_text:      str,
     questions_path: str,
     answers_path:   str,
+    chapters_path:  str,
     raw_path:      str | None = None,
     page_num:      int | None = None,
 ):
-    """Split model output on DELIMITER and save each half to its own CSV.
+    """Split model output on DELIMITER and save each part to its own CSV.
     Optionally appends the full raw output to an audit file.
     """
     parts = raw_text.split(DELIMITER)
     questions_block = parts[0] if len(parts) > 0 else ""
     answers_block   = parts[1] if len(parts) > 1 else ""
+    chapters_block  = parts[2] if len(parts) > 2 else ""
     _append_csv(questions_block, questions_path)
     _append_csv(answers_block,   answers_path)
+    _append_csv(chapters_block,  chapters_path)
     if raw_path and page_num is not None:
         _append_raw(raw_text, page_num, raw_path)
 
@@ -236,15 +257,17 @@ if __name__ == "__main__":
     base          = pdf_path.parent / f"{pdf_path.stem}_page{args.start}"
     questions_csv = str(base) + "_questions.csv"
     answers_csv   = str(base) + "_answers.csv"
+    chapters_csv  = str(base) + "_chapters.csv"
     raw_csv       = str(pdf_path.parent / f"{pdf_path.stem}_raw.csv")
 
     jpg_path = pdf_page_to_jpg(args.pdf, args.start)
     print(f"[extract_page] Rendering page {args.start} → {jpg_path}")
     try:
         raw_text = generate(jpg_path, debug=args.debug)
-        split_and_save_csv(raw_text, questions_csv, answers_csv, raw_csv, args.start)
+        split_and_save_csv(raw_text, questions_csv, answers_csv, chapters_csv, raw_csv, args.start)
         print(f"[extract_page] Questions → {questions_csv}")
         print(f"[extract_page] Answers   → {answers_csv}")
+        print(f"[extract_page] Chapters  → {chapters_csv}")
         print(f"[extract_page] Raw audit → {raw_csv}")
     finally:
         if os.path.exists(jpg_path):
