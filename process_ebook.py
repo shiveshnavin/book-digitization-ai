@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Allow importing extract_page from the same directory
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from extract_page import pdf_page_to_jpg, generate, split_and_save_csv
+from extract_page import pdf_page_to_jpg, generate, save_csvs
 
 # ── Locks ─────────────────────────────────────────────────────────────────────
 _csv_lock   = threading.Lock()
@@ -107,20 +107,21 @@ def process_page(
             progress_cb=progress_cb if use_cb else None,
         )
 
+        questions_text, answers_text, chapters_text = csv_text
         with _csv_lock:
-            split_and_save_csv(csv_text, questions_csv, answers_csv, chapters_csv, raw_csv, page_num)
+            save_csvs(questions_text, answers_text, chapters_text, questions_csv, answers_csv, chapters_csv, raw_csv, page_num)
 
         with _index_lock:
             if page_num not in index["completed"]:
                 index["completed"].append(page_num)
             _write_index(index_path, index)
 
-        _set(f"✓ done in {_elapsed[0]:.1f}s")
+        _set(f"[OK] done in {_elapsed[0]:.1f}s")
         return page_num, True
 
     except Exception as exc:
         err_msg = str(exc)
-        _set(f"✗ failed — {err_msg}")
+        _set(f"[ERR] failed - {err_msg}")
 
         with _index_lock:
             failed_pages = [e["page"] for e in index["failed"]]
@@ -209,10 +210,10 @@ if __name__ == "__main__":
     print(f"[process_ebook] PDF      : {pdf_path.name}")
     print(f"[process_ebook] Pages    : {args.start}–{end_page}  ({total_pages} total in PDF)")
     print(f"[process_ebook] To do    : {len(pages_to_process)}  |  Skipped (done): {skipped}  |  Previously failed: {len(failed_set)}")
-    print(f"[process_ebook] Questions → {questions_csv}")
-    print(f"[process_ebook] Answers   → {answers_csv}")
-    print(f"[process_ebook] Chapters  → {chapters_csv}")
-    print(f"[process_ebook] Raw audit → {raw_csv}")
+    print(f"[process_ebook] Questions -> {questions_csv}")
+    print(f"[process_ebook] Answers   -> {answers_csv}")
+    print(f"[process_ebook] Chapters  -> {chapters_csv}")
+    print(f"[process_ebook] Raw audit -> {raw_csv}")
 
     print(f"[process_ebook] Index     : {index_path}")
     print(f"[process_ebook] Workers  : {args.parallel}")
@@ -254,16 +255,16 @@ if __name__ == "__main__":
         display.teardown()
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    print(f"\n[process_ebook] Finished — ✓ {done_count} succeeded  ✗ {failed_count} failed")
+    print(f"\n[process_ebook] Finished - [OK] {done_count} succeeded  [ERR] {failed_count} failed")
     if index["failed"]:
         print(f"[process_ebook] Failed pages :")
         for entry in sorted(index["failed"], key=lambda e: e["page"]):
             print(f"                  page {entry['page']:>4} — {entry['error']}")
         print(f"[process_ebook] Re-run same command to retry failed pages.")
-    print(f"[process_ebook] Questions → {questions_csv}")
-    print(f"[process_ebook] Answers   → {answers_csv}")
-    print(f"[process_ebook] Chapters  → {chapters_csv}")
-    print(f"[process_ebook] Raw audit → {raw_csv}")
+    print(f"[process_ebook] Questions -> {questions_csv}")
+    print(f"[process_ebook] Answers   -> {answers_csv}")
+    print(f"[process_ebook] Chapters  -> {chapters_csv}")
+    print(f"[process_ebook] Raw audit -> {raw_csv}")
 
     # ── Final Assembly ────────────────────────────────────────────────────────
     print(f"\n[process_ebook] Assembling final question bank CSV...")

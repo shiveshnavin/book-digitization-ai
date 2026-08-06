@@ -4,6 +4,7 @@ import argparse
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field
 
 load_dotenv()
 _raw_keys = os.getenv("GEMINI_API_KEY")
@@ -13,64 +14,60 @@ GEMINI_API_KEYS = [k.strip() for k in _raw_keys.split(",") if k.strip()]
 if not GEMINI_API_KEYS:
     raise RuntimeError("No valid keys found in GEMINI_API_KEY")
 
-SYSTEM_INSTRUCTIONS="""
+class Question(BaseModel):
+    ocr_page: int
+    question_no: int
+    question: str
+    instruction: str
+    optionA: str
+    optionB: str
+    optionC: str
+    optionD: str
+    has_images: bool
 
-You are a precise data-extraction assistant.
+class Answer(BaseModel):
+    ocr_page: int
+    question_no: int
+    has_images: bool
+    correct_option: str
+    correct_option_text: str
+    explanation: str
+
+class Chapter(BaseModel):
+    ocr_page: int
+    chapter_no: str
+    chapter_name: str
+
+class QuestionsList(BaseModel):
+    items: list[Question]
+
+class AnswersList(BaseModel):
+    items: list[Answer]
+
+class ChaptersList(BaseModel):
+    items: list[Chapter]
+
+SYS_QUESTIONS = """You are a precise data-extraction assistant.
 You are given an image of a single PDF page from an Indian competitive exam study book.
-
-Extract ALL questions, answers, and chapters present on the page and return them ONLY as JSON arrays. No extra text, no markdown fences (like ```json).
-
-Rules:
-You need to output exactly 3 JSON arrays separated by ---++---.
-The first array is for questions, followed by ---++---, then an array for answers, followed by ---++---, then an array for chapters.
-
-1. The FIRST array (QUESTIONS) must start with exactly this header array:
-   ["type", "ocr_page", "question_no", "question", "instruction", "optionA", "optionB", "optionC", "optionD", "has_images"]
-   - Each subsequent element is a data array with exactly 10 values.
-   - "type": "question"
-   - "ocr_page": the page number as printed in the book
-   - "question_no": the question number (1, 2, 3, ...)
-   - "question": the self-contained verbatim question text. Use Markdown for underlines/bold.
-   - "instruction": any explicit instruction text shown (optional)
-   - "optionA", "optionB", "optionC", "optionD": the four answer options (only the text, no numbering)
-   - "has_images": true/false
-   Leave other fields empty if not present.
-
-2. The SECOND array (ANSWERS) must start with exactly this header array:
-   ["type", "ocr_page", "question_no", "has_images", "correct_option", "correct_option_text", "explanation"]
-   - "type": "answer"
-   - "correct_option": A/B/C/D or 1/2/3/4
-   - "correct_option_text": the text of the correct option
-   - "explanation": step-by-step solution text verbatim. Use Markdown for underlines/bold.
-
-3. The THIRD array (CHAPTERS) must start with exactly this header array:
-   ["type", "ocr_page", "chapter_no", "chapter_name"]
-   - "type": "chapter"
-   - "chapter_no": the chapter number if available
-   - "chapter_name": the name of the chapter (look for large bold font)
-
-If a section has no data, output only the header array inside the main array.
-Example structure:
-[
-  ["type", "ocr_page", "question_no", "question", "instruction", "optionA", "optionB", "optionC", "optionD", "has_images"],
-  ["question", 1, 1, "What is X?", "", "A", "B", "C", "D", false]
-]
----++---
-[
-  ["type", "ocr_page", "question_no", "has_images", "correct_option", "correct_option_text", "explanation"],
-  ["answer", 1, 1, false, "B", "B", "Explanation here"]
-]
----++---
-[
-  ["type", "ocr_page", "chapter_no", "chapter_name"]
-]
-
-MANDATORY INSTRUCTIONS:
-- Do NOT output anything outside the JSON arrays and delimiters - no explanations, no prose.
-- Do NOT wrap your output in ```json or any other markdown code block format.
-- Output MUST be valid JSON (use double quotes for strings, no trailing commas).
+Extract ALL questions present on the page and return them.
+"question" must be the self-contained verbatim question text. Use Markdown for underlines/bold.
+"instruction" is any explicit instruction text shown (optional).
+"optionA", "optionB", "optionC", "optionD" are the four answer options (only the text, no numbering).
 """
 
+SYS_ANSWERS = """You are a precise data-extraction assistant.
+You are given an image of a single PDF page from an Indian competitive exam study book.
+Extract ALL answers present on the page and return them.
+"correct_option" is A/B/C/D or 1/2/3/4.
+"correct_option_text" is the text of the correct option.
+"explanation" is the step-by-step solution text verbatim. Use Markdown for underlines/bold.
+"""
+
+SYS_CHAPTERS = """You are a precise data-extraction assistant.
+You are given an image of a single PDF page from an Indian competitive exam study book.
+Extract ALL chapters present on the page and return them.
+"chapter_name" is the name of the chapter (look for large bold font).
+"""
 
 def pdf_page_to_jpg(pdf_path: str, page_number: int) -> str:
     """Convert a single PDF page (1-indexed) to a JPG file next to the PDF.
@@ -96,25 +93,13 @@ def pdf_page_to_jpg(pdf_path: str, page_number: int) -> str:
     return str(jpg_path)
 
 
-def generate(image_path: str, debug: bool = False, progress_cb=None) -> str:
-    """Run extraction and return the full CSV text.
-
-    Args:
-        progress_cb: optional callable(chars, cps, elapsed, done) called on
-                     every streamed chunk instead of printing to stdout.
-                     When provided, generate() stays completely silent.
-    """
+def generate_category(model, image_bytes, schema, sys_prompt, category_name, debug=False, progress_cb=None):
     import time
     import random
-
+    
     api_key = random.choice(GEMINI_API_KEYS)
-    client = genai.Client(
-        api_key=api_key,
-    )
-
-    image_bytes = pathlib.Path(image_path).read_bytes()
-
-    model = "gemma-4-31b-it"
+    client = genai.Client(api_key=api_key)
+    
     contents = [
         types.Content(
             role="user",
@@ -126,23 +111,26 @@ def generate(image_path: str, debug: bool = False, progress_cb=None) -> str:
             ],
         ),
     ]
-    tools = [
-        types.Tool(googleSearch=types.GoogleSearch()),
-    ]
+    # Removed GoogleSearch tool as it's not needed for OCR and consumes search quota
+    tools = []
     generate_content_config = types.GenerateContentConfig(
         thinking_config=types.ThinkingConfig(
             thinking_level="MINIMAL",
         ),
         tools=tools,
         system_instruction=[
-            types.Part.from_text(text=SYSTEM_INSTRUCTIONS)
+            types.Part.from_text(text=sys_prompt)
         ],
+        response_mime_type="application/json",
+        response_schema=schema,
     )
 
     chunks = []
     total_chars = 0
     t_start = time.perf_counter()
 
+    if debug:
+        print(f"\n--- Extracting {category_name} ---")
     for chunk in client.models.generate_content_stream(
         model=model,
         contents=contents,
@@ -152,31 +140,62 @@ def generate(image_path: str, debug: bool = False, progress_cb=None) -> str:
             chunks.append(text)
             total_chars += len(text)
             elapsed_so_far = time.perf_counter() - t_start
-            cps = total_chars / elapsed_so_far if elapsed_so_far > 0 else 0
-            if progress_cb:
-                progress_cb(total_chars, cps, elapsed_so_far, done=False)
-            elif debug:
+            
+            if debug:
                 print(text, end="", flush=True)
-            else:
-                print(f"\r  {total_chars} chars | {cps:.1f} ch/s | {elapsed_so_far:.1f}s", end="", flush=True)
+            elif progress_cb:
+                pass
 
     elapsed = time.perf_counter() - t_start
     cps_final = total_chars / elapsed if elapsed > 0 else 0
-    if progress_cb:
-        progress_cb(total_chars, cps_final, elapsed, done=True)
-    else:
-        if debug:
-            print()  # newline after raw stream
-        print(f"\r  {total_chars} chars | {cps_final:.1f} ch/s | {elapsed:.1f}s")
+    
+    if debug:
+        print()
+    print(f"  [{category_name}] {total_chars} chars | {cps_final:.1f} ch/s | {elapsed:.1f}s")
 
     return "".join(chunks)
+
+def generate(image_path: str, debug: bool = False, progress_cb=None) -> tuple[str, str, str]:
+    import random
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    image_bytes = pathlib.Path(image_path).read_bytes()
+    
+    # Assign a distinct model to each category to bypass concurrent rate limits
+    available_models = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemma-4-31b-it"]
+    random.shuffle(available_models)
+    
+    model_q = available_models[0]
+    model_a = available_models[1]
+    model_c = available_models[2]
+
+    t_start = time.perf_counter()
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_q = executor.submit(generate_category, model_q, image_bytes, QuestionsList, SYS_QUESTIONS, "Questions", debug, progress_cb)
+        future_a = executor.submit(generate_category, model_a, image_bytes, AnswersList, SYS_ANSWERS, "Answers", debug, progress_cb)
+        future_c = executor.submit(generate_category, model_c, image_bytes, ChaptersList, SYS_CHAPTERS, "Chapters", debug, progress_cb)
+
+        # Wait for all
+        questions_text = future_q.result()
+        answers_text = future_a.result()
+        chapters_text = future_c.result()
+    
+    total_time = time.perf_counter() - t_start
+    if progress_cb:
+        total_chars = len(questions_text) + len(answers_text) + len(chapters_text)
+        cps = total_chars / total_time if total_time > 0 else 0
+        progress_cb(total_chars, cps, total_time, done=True)
+    
+    return questions_text, answers_text, chapters_text
 
 
 DELIMITER = "---++---"
 
 
-def _append_json_to_csv(json_text: str, output_path: str):
-    """Parse JSON array of arrays and append to CSV securely using python's csv module."""
+def _append_json_to_csv(json_text: str, output_path: str, injected_type: str):
+    """Parse JSON containing a dict with an 'items' list and append to CSV."""
     import json, csv
     json_text = json_text.strip()
     if json_text.startswith("```json"):
@@ -190,13 +209,30 @@ def _append_json_to_csv(json_text: str, output_path: str):
     if not json_text:
         return
     try:
-        rows = json.loads(json_text)
+        data = json.loads(json_text)
     except json.JSONDecodeError as e:
         print(f"JSONDecodeError: {e} \nContent: {json_text}")
         return
 
-    if not isinstance(rows, list) or not rows:
+    # Extract the items array from the parsed dict
+    if isinstance(data, dict) and "items" in data:
+        items = data["items"]
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = []
+
+    if not items:
         return
+
+    # Inject the type manually at the front of each dictionary
+    items_with_type = [{"type": injected_type, **item} for item in items]
+
+    # Convert list of dicts to list of lists
+    headers = list(items_with_type[0].keys())
+    rows = [headers]
+    for item in items_with_type:
+        rows.append([item.get(h, "") for h in headers])
 
     file_exists = os.path.exists(output_path)
     with open(output_path, "a", encoding="utf-8", newline="") as f:
@@ -210,37 +246,36 @@ def _append_json_to_csv(json_text: str, output_path: str):
             if data_rows:
                 writer.writerows(data_rows)
 
-def _append_raw(raw_text: str, page_num: int, raw_path: str):
-    """Append one row (page_num, raw_output) to the audit raw CSV."""
+def _append_raw(raw_text: str, page_num: int, raw_path: str, category: str):
+    """Append one row to the audit raw CSV."""
     import csv
     file_exists = os.path.exists(raw_path)
     with open(raw_path, "a", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["page_num", "raw_output"])
-        writer.writerow([page_num, raw_text.strip()])
+            writer.writerow(["page_num", "category", "raw_output"])
+        writer.writerow([page_num, category, raw_text.strip()])
 
 
-def split_and_save_csv(
-    raw_text:      str,
+def save_csvs(
+    questions_text: str,
+    answers_text:   str,
+    chapters_text:  str,
     questions_path: str,
     answers_path:   str,
     chapters_path:  str,
     raw_path:      str | None = None,
     page_num:      int | None = None,
 ):
-    """Split model output on DELIMITER and save each part to its own CSV.
-    Optionally appends the full raw output to an audit file.
-    """
-    parts = raw_text.split(DELIMITER)
-    questions_block = parts[0] if len(parts) > 0 else ""
-    answers_block   = parts[1] if len(parts) > 1 else ""
-    chapters_block  = parts[2] if len(parts) > 2 else ""
-    _append_json_to_csv(questions_block, questions_path)
-    _append_json_to_csv(answers_block,   answers_path)
-    _append_json_to_csv(chapters_block,  chapters_path)
+    """Save the JSON parts to CSV."""
+    _append_json_to_csv(questions_text, questions_path, "question")
+    _append_json_to_csv(answers_text,   answers_path, "answer")
+    _append_json_to_csv(chapters_text,  chapters_path, "chapter")
+    
     if raw_path and page_num is not None:
-        _append_raw(raw_text, page_num, raw_path)
+        _append_raw(questions_text, page_num, raw_path, "Questions")
+        _append_raw(answers_text, page_num, raw_path, "Answers")
+        _append_raw(chapters_text, page_num, raw_path, "Chapters")
 
 
 if __name__ == "__main__":
@@ -274,14 +309,14 @@ if __name__ == "__main__":
     raw_csv       = str(pdf_path.parent / f"{pdf_path.stem}_raw.csv")
 
     jpg_path = pdf_page_to_jpg(args.pdf, args.start)
-    print(f"[extract_page] Rendering page {args.start} → {jpg_path}")
+    print(f"[extract_page] Rendering page {args.start} -> {jpg_path}")
     try:
-        raw_text = generate(jpg_path, debug=args.debug)
-        split_and_save_csv(raw_text, questions_csv, answers_csv, chapters_csv, raw_csv, args.start)
-        print(f"[extract_page] Questions → {questions_csv}")
-        print(f"[extract_page] Answers   → {answers_csv}")
-        print(f"[extract_page] Chapters  → {chapters_csv}")
-        print(f"[extract_page] Raw audit → {raw_csv}")
+        questions_text, answers_text, chapters_text = generate(jpg_path, debug=args.debug)
+        save_csvs(questions_text, answers_text, chapters_text, questions_csv, answers_csv, chapters_csv, raw_csv, args.start)
+        print(f"[extract_page] Questions -> {questions_csv}")
+        print(f"[extract_page] Answers   -> {answers_csv}")
+        print(f"[extract_page] Chapters  -> {chapters_csv}")
+        print(f"[extract_page] Raw audit -> {raw_csv}")
     finally:
         if os.path.exists(jpg_path):
             os.remove(jpg_path)
