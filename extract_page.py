@@ -18,7 +18,7 @@ class Question(BaseModel):
     ocr_page: int
     question_no: int
     question: str
-    instruction: str
+    exam_tags: str
     optionA: str
     optionB: str
     optionC: str
@@ -50,8 +50,8 @@ class ChaptersList(BaseModel):
 SYS_QUESTIONS = """You are a precise data-extraction assistant.
 You are given an image of a single PDF page from an Indian competitive exam study book.
 Extract ALL questions present on the page and return them.
-"question" must be the self-contained verbatim question text. Use Markdown for underlines/bold.
-"instruction" is any explicit instruction text shown (optional).
+"question" must be the self-contained verbatim question text. Use Markdown for underlines/bold/table etc.
+"exam_tags" is the explicit exam metadata tag printed next to or below the question (e.g. "SSC CHSL TIER-I, 29/11/2025 (Shift-01)", "SSC CGL 2023", etc.). Do NOT extract generic instructions like "Select the correct option."
 "optionA", "optionB", "optionC", "optionD" are the four answer options (only the text, no numbering).
 """
 
@@ -60,13 +60,19 @@ You are given an image of a single PDF page from an Indian competitive exam stud
 Extract ALL answers present on the page and return them.
 "correct_option" is A/B/C/D or 1/2/3/4.
 "correct_option_text" is the text of the correct option.
-"explanation" is the step-by-step solution text verbatim. Use Markdown for underlines/bold.
+"explanation" is the step-by-step solution text verbatim. Use Markdown for underlines/bold/table etc.
 """
 
-SYS_CHAPTERS = """You are a precise data-extraction assistant.
+SYS_CHAPTERS = """You are a precise data-extraction/OCR assistant.
 You are given an image of a single PDF page from an Indian competitive exam study book.
-Extract ALL chapters present on the page and return them.
-"chapter_name" is the name of the chapter (look for large bold font).
+Your ONLY task is to extract a major CHAPTER TITLE or CHAPTER BANNER (e.g. 'CHAPTER 5: ...') IF AND ONLY IF it is prominently printed on this page.
+
+CRITICAL RULES:
+1. Look for large, bold main chapter headings or chapter banner titles at the top of the page.
+2. If NO explicit main chapter banner/heading is printed on this page, return an EMPTY list: `items: []`.
+3. DO NOT invent, guess, hallucinate, or infer chapter names from question text, options, or topics.
+4. DO NOT extract sub-headers, section titles, or question headings as chapters.
+5. If no explicit main chapter heading is present on the image, `items` MUST be empty (`[]`).
 """
 
 def pdf_page_to_jpg(pdf_path: str, page_number: int) -> str:
@@ -139,25 +145,25 @@ def generate_category(model, image_bytes, schema, sys_prompt, category_name, deb
         if text := chunk.text:
             chunks.append(text)
             total_chars += len(text)
-            elapsed_so_far = time.perf_counter() - t_start
             
             if debug:
                 print(text, end="", flush=True)
             elif progress_cb:
-                pass
+                progress_cb(category_name, len(text))
 
     elapsed = time.perf_counter() - t_start
     cps_final = total_chars / elapsed if elapsed > 0 else 0
     
     if debug:
         print()
-    print(f"  [{category_name}] {total_chars} chars | {cps_final:.1f} ch/s | {elapsed:.1f}s")
+        print(f"  [{category_name}] {total_chars} chars | {cps_final:.1f} ch/s | {elapsed:.1f}s")
 
     return "".join(chunks)
 
 def generate(image_path: str, debug: bool = False, progress_cb=None) -> tuple[str, str, str]:
     import random
     import time
+    import threading
     from concurrent.futures import ThreadPoolExecutor
 
     image_bytes = pathlib.Path(image_path).read_bytes()
@@ -171,11 +177,23 @@ def generate(image_path: str, debug: bool = False, progress_cb=None) -> tuple[st
     model_c = available_models[2]
 
     t_start = time.perf_counter()
+    category_chars = {"Questions": 0, "Answers": 0, "Chapters": 0}
+    progress_lock = threading.Lock()
+
+    def cat_progress_cb(cat_name, chunk_len):
+        if not progress_cb:
+            return
+        with progress_lock:
+            category_chars[cat_name] += chunk_len
+            total_chars = sum(category_chars.values())
+            elapsed = time.perf_counter() - t_start
+            cps = total_chars / elapsed if elapsed > 0 else 0
+            progress_cb(total_chars, cps, elapsed, done=False)
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        future_q = executor.submit(generate_category, model_q, image_bytes, QuestionsList, SYS_QUESTIONS, "Questions", debug, progress_cb)
-        future_a = executor.submit(generate_category, model_a, image_bytes, AnswersList, SYS_ANSWERS, "Answers", debug, progress_cb)
-        future_c = executor.submit(generate_category, model_c, image_bytes, ChaptersList, SYS_CHAPTERS, "Chapters", debug, progress_cb)
+        future_q = executor.submit(generate_category, model_q, image_bytes, QuestionsList, SYS_QUESTIONS, "Questions", debug, cat_progress_cb if progress_cb else None)
+        future_a = executor.submit(generate_category, model_a, image_bytes, AnswersList, SYS_ANSWERS, "Answers", debug, cat_progress_cb if progress_cb else None)
+        future_c = executor.submit(generate_category, model_c, image_bytes, ChaptersList, SYS_CHAPTERS, "Chapters", debug, cat_progress_cb if progress_cb else None)
 
         # Wait for all
         questions_text = future_q.result()

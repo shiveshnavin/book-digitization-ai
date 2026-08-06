@@ -98,8 +98,8 @@ def process_page(
     try:
         jpg_path = pdf_page_to_jpg(pdf_path, page_num)
 
-        use_cb    = parallel > 1          # slot display for parallel
         use_debug = debug and parallel == 1  # raw stream only when single
+        use_cb    = not use_debug            # slot display progress when not in debug mode
 
         csv_text = generate(
             jpg_path,

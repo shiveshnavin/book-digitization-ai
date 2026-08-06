@@ -59,7 +59,8 @@ def main():
         def get_chapter(page):
             return ""
 
-    # 2. Load answers grouped by ocr_page in sequential order
+    # 2. Load answers and index by (chapter, question_no) and by page
+    answers_map = {}
     answers_by_page = defaultdict(list)
     if answers_csv.exists():
         with open(answers_csv, "r", encoding="utf-8") as f:
@@ -69,11 +70,15 @@ def main():
                     continue
                 try:
                     p = int(row["ocr_page"])
+                    q_no = str(row.get("question_no", "")).strip()
+                    ch = get_chapter(p)
+                    if ch and q_no:
+                        answers_map[(ch.lower(), q_no)] = row
                     answers_by_page[p].append(row)
                 except ValueError:
                     pass
 
-    # 3. Process questions and merge with answers sequentially per page
+    # 3. Process questions and merge with answers (global chapter+Q# lookup with page fallback)
     output_rows = []
     if questions_csv.exists():
         with open(questions_csv, "r", encoding="utf-8") as f:
@@ -86,7 +91,14 @@ def main():
                 except ValueError:
                     continue
 
-                ans = answers_by_page[p].pop(0) if answers_by_page[p] else {}
+                chapter = get_chapter(p)
+                q_no = str(row.get("question_no", "")).strip()
+
+                ans = {}
+                if chapter and q_no and (chapter.lower(), q_no) in answers_map:
+                    ans = answers_map[(chapter.lower(), q_no)]
+                elif answers_by_page[p]:
+                    ans = answers_by_page[p].pop(0)
                 chapter = get_chapter(p)
                 
                 # Build the merged row based on target schema
@@ -114,7 +126,7 @@ def main():
                     "explanation_D": "",
                     "creator_id": "",
                     "creator_name": "",
-                    "tags": row.get("instruction", "")
+                    "tags": row.get("exam_tags", row.get("instruction", ""))
                 }
                 output_rows.append(merged)
 
