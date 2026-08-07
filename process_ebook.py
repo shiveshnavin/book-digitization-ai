@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Allow importing extract_page from the same directory
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from extract_page import pdf_page_to_jpg, generate, save_csvs
+from extract_page_to_json import extract_pdf_page, generate_page_json
+import time
 
 # ── Locks ─────────────────────────────────────────────────────────────────────
 _csv_lock   = threading.Lock()
@@ -94,22 +95,39 @@ def process_page(
         _set(f"{chars} chars | {cps:.1f} ch/s | {elapsed:.1f}s")
 
     _set("starting…")
-    jpg_path = None
+    temp_pdf_path = None
     try:
-        jpg_path = pdf_page_to_jpg(pdf_path, page_num)
+        temp_pdf_path = extract_pdf_page(pdf_path, page_num)
 
-        use_debug = debug and parallel == 1  # raw stream only when single
-        use_cb    = not use_debug            # slot display progress when not in debug mode
+        use_debug = debug and parallel == 1  # stream only when single
 
-        csv_text = generate(
-            jpg_path,
-            debug=use_debug,
-            progress_cb=progress_cb if use_cb else None,
-        )
+        t0 = time.perf_counter()
+        json_text = generate_page_json(temp_pdf_path, page_num, debug=use_debug)
+        _elapsed[0] = time.perf_counter() - t0
 
-        questions_text, answers_text, chapters_text = csv_text
-        with _csv_lock:
-            save_csvs(questions_text, answers_text, chapters_text, questions_csv, answers_csv, chapters_csv, raw_csv, page_num)
+        # Save unified JSON to pages/page_{n}.json
+        pages_dir = pathlib.Path(pdf_path).parent / "pages"
+        pages_dir.mkdir(exist_ok=True)
+        out_json_path = pages_dir / f"page_{page_num}.json"
+
+        json_text = json_text.strip()
+        if json_text.startswith("```json"):
+            json_text = json_text[7:]
+        if json_text.startswith("```"):
+            json_text = json_text[3:]
+        if json_text.endswith("```"):
+            json_text = json_text[:-3]
+
+        try:
+            data = json.loads(json_text)
+            data["page"] = page_num
+            with _csv_lock:
+                with open(out_json_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4)
+        except json.JSONDecodeError:
+            with _csv_lock:
+                with open(out_json_path, "w", encoding="utf-8") as f:
+                    f.write(json_text)
 
         with _index_lock:
             if page_num not in index["completed"]:
@@ -124,7 +142,7 @@ def process_page(
         _set(f"[ERR] failed - {err_msg}")
 
         with _index_lock:
-            failed_pages = [e["page"] for e in index["failed"]]
+            failed_pages = [e["page"] for e in index.get("failed", [])]
             if page_num not in failed_pages:
                 index["failed"].append({"page": page_num, "error": err_msg})
             _write_index(index_path, index)
@@ -132,8 +150,8 @@ def process_page(
         return page_num, False
 
     finally:
-        if jpg_path and os.path.exists(jpg_path):
-            os.remove(jpg_path)
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            os.remove(temp_pdf_path)
 
 
 # ── PDF page count ────────────────────────────────────────────────────────────
@@ -270,13 +288,18 @@ if __name__ == "__main__":
     print(f"\n[process_ebook] Assigning chapters to CSVs...")
     import subprocess
     try:
-        subprocess.run(
-            ["python", "assign_chapters.py", index_path],
-            check=True
-        )
-        # subprocess.run(
-        #     ["python", "generate_qbank.py", index_path],
-        #     check=True
-        # )
+        # Run per-page JSON extraction using extract_page_to_json.py for completed pages.
+        # Skip pages that already have a JSON file in the pages/ directory.
+        completed_pages = sorted(index.get("completed", []))
+        pages_dir = pdf_dir / "pages"
+        pages_dir.mkdir(exist_ok=True)
+        for p in completed_pages:
+            out_json = pages_dir / f"page_{p}.json"
+            if out_json.exists():
+                continue
+            subprocess.run(
+                ["python", "extract_page_to_json.py", str(pdf_path), "--start", str(p)],
+                check=True
+            )
     except subprocess.CalledProcessError as e:
-        print(f"[process_ebook] ✗ Failed to assign chapters: {e}")
+        print(f"[process_ebook] ✗ Failed to extract pages to JSON: {e}")
