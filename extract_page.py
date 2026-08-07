@@ -23,6 +23,7 @@ class Question(BaseModel):
     optionB: str
     optionC: str
     optionD: str
+    optionE: str
     has_images: bool
 
 class Answer(BaseModel):
@@ -52,54 +53,53 @@ You are given an image of a single PDF page from an Indian competitive exam stud
 Extract ALL questions present on the page and return them.
 "question" must be the self-contained verbatim question text. Use Markdown for underlines/bold/table etc.
 "exam_tags" is the explicit exam metadata tag printed next to or below the question (e.g. "SSC CHSL TIER-I, 29/11/2025 (Shift-01)", "SSC CGL 2023", etc.). Do NOT extract generic instructions like "Select the correct option."
-"optionA", "optionB", "optionC", "optionD" are the four answer options (only the text, no numbering).
+"optionA", "optionB", "optionC", "optionD", "optionE"  are the five answer options (only the text, no numbering).
+OptionE may be empty if the question has only four options.
+"has_images" is true if the question has any images, diagrams, or figures associated with
 """
 
 SYS_ANSWERS = """You are a precise data-extraction assistant.
 You are given an image of a single PDF page from an Indian competitive exam study book.
 Extract ALL answers present on the page and return them.
-"correct_option" is A/B/C/D or 1/2/3/4.
+"correct_option" is A/B/C/D/E or 1/2/3/4/5.
 "correct_option_text" is the text of the correct option.
 "explanation" is the step-by-step solution text verbatim. Use Markdown for underlines/bold/table etc.
 """
 
 SYS_CHAPTERS = """You are a precise data-extraction/OCR assistant.
 You are given an image of a single PDF page from an Indian competitive exam study book.
-Your ONLY task is to extract a major CHAPTER TITLE or CHAPTER BANNER (e.g. 'CHAPTER 5: ...') IF AND ONLY IF it is prominently printed on this page.
+Your ONLY task is to extract a major CHAPTER TITLE or CHAPTER BANNER (e.g., 'CHAPTER 5: ...' or a large standalone topic title like 'SPOT THE ERROR') IF AND ONLY IF it is prominently printed on this page.
 
 CRITICAL RULES:
-1. Look for large, bold main chapter headings or chapter banner titles at the top of the page.
+1. Look for large, bold main chapter headings or major topic titles at the top of the page.
 2. If NO explicit main chapter banner/heading is printed on this page, return an EMPTY list: `items: []`.
-3. DO NOT invent, guess, hallucinate, or infer chapter names from question text, options, or topics.
-4. DO NOT extract sub-headers, section titles, or question headings as chapters.
+3. DO NOT invent, guess, hallucinate, or infer chapter names from question text, options, or minor topics.
+4. DO NOT extract minor sub-headers (like 'Examination wise Questions', 'Solutions', or 'SSC CGL 2025 Tier - I') as chapters.
 5. If no explicit main chapter heading is present on the image, `items` MUST be empty (`[]`).
 """
 
-def pdf_page_to_jpg(pdf_path: str, page_number: int) -> str:
-    """Convert a single PDF page (1-indexed) to a JPG file next to the PDF.
-    Returns the path of the created JPG."""
-    from pdf2image import convert_from_path
+def extract_pdf_page(pdf_path: str, page_number: int) -> str:
+    """Extract a single PDF page (1-indexed) to a temporary PDF file next to the original.
+    Returns the path of the created PDF."""
+    from pypdf import PdfReader, PdfWriter
 
     pdf_dir = pathlib.Path(pdf_path).parent
     pdf_stem = pathlib.Path(pdf_path).stem
-    jpg_path = pdf_dir / f"{pdf_stem}_page{page_number}.jpg"
+    out_path = pdf_dir / f"{pdf_stem}_page{page_number}.pdf"
 
-    pages = convert_from_path(
-        pdf_path,
-        first_page=page_number,
-        last_page=page_number,
-        dpi=200,
-        fmt="jpeg",
-    )
-
-    if not pages:
-        raise ValueError(f"Could not render page {page_number} from {pdf_path}")
-
-    pages[0].save(str(jpg_path), "JPEG")
-    return str(jpg_path)
+    reader = PdfReader(pdf_path)
+    writer = PdfWriter()
+    
+    # page_number is 1-indexed
+    writer.add_page(reader.pages[page_number - 1])
+    
+    with open(out_path, "wb") as f:
+        writer.write(f)
+        
+    return str(out_path)
 
 
-def generate_category(model, image_bytes, schema, sys_prompt, category_name, debug=False, progress_cb=None):
+def generate_category(model, file_bytes, schema, sys_prompt, category_name, debug=False, progress_cb=None):
     import time
     import random
     
@@ -111,8 +111,8 @@ def generate_category(model, image_bytes, schema, sys_prompt, category_name, deb
             role="user",
             parts=[
                 types.Part.from_bytes(
-                    mime_type="image/jpeg",
-                    data=image_bytes,
+                    mime_type="application/pdf",
+                    data=file_bytes,
                 )
             ],
         ),
@@ -160,21 +160,18 @@ def generate_category(model, image_bytes, schema, sys_prompt, category_name, deb
 
     return "".join(chunks)
 
-def generate(image_path: str, debug: bool = False, progress_cb=None) -> tuple[str, str, str]:
+def generate(file_path: str, debug: bool = False, progress_cb=None) -> tuple[str, str, str]:
     import random
     import time
     import threading
     from concurrent.futures import ThreadPoolExecutor
 
-    image_bytes = pathlib.Path(image_path).read_bytes()
+    file_bytes = pathlib.Path(file_path).read_bytes()
     
-    # Assign a distinct model to each category to bypass concurrent rate limits
-    available_models = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemma-4-31b-it"]
-    random.shuffle(available_models)
-    
-    model_q = available_models[0]
-    model_a = available_models[1]
-    model_c = available_models[2]
+    # Use gemma model for all queries as requested to support iterative testing
+    model_q = "gemma-4-31b-it"
+    model_a = "gemma-4-31b-it"
+    model_c = "gemma-4-31b-it"
 
     t_start = time.perf_counter()
     category_chars = {"Questions": 0, "Answers": 0, "Chapters": 0}
@@ -191,9 +188,9 @@ def generate(image_path: str, debug: bool = False, progress_cb=None) -> tuple[st
             progress_cb(total_chars, cps, elapsed, done=False)
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        future_q = executor.submit(generate_category, model_q, image_bytes, QuestionsList, SYS_QUESTIONS, "Questions", debug, cat_progress_cb if progress_cb else None)
-        future_a = executor.submit(generate_category, model_a, image_bytes, AnswersList, SYS_ANSWERS, "Answers", debug, cat_progress_cb if progress_cb else None)
-        future_c = executor.submit(generate_category, model_c, image_bytes, ChaptersList, SYS_CHAPTERS, "Chapters", debug, cat_progress_cb if progress_cb else None)
+        future_q = executor.submit(generate_category, model_q, file_bytes, QuestionsList, SYS_QUESTIONS, "Questions", debug, cat_progress_cb if progress_cb else None)
+        future_a = executor.submit(generate_category, model_a, file_bytes, AnswersList, SYS_ANSWERS, "Answers", debug, cat_progress_cb if progress_cb else None)
+        future_c = executor.submit(generate_category, model_c, file_bytes, ChaptersList, SYS_CHAPTERS, "Chapters", debug, cat_progress_cb if progress_cb else None)
 
         # Wait for all
         questions_text = future_q.result()
@@ -212,7 +209,7 @@ def generate(image_path: str, debug: bool = False, progress_cb=None) -> tuple[st
 DELIMITER = "---++---"
 
 
-def _append_json_to_csv(json_text: str, output_path: str, injected_type: str):
+def _append_json_to_csv(json_text: str, output_path: str, injected_type: str, page_num: int | None = None):
     """Parse JSON containing a dict with an 'items' list and append to CSV."""
     import json, csv
     json_text = json_text.strip()
@@ -244,10 +241,18 @@ def _append_json_to_csv(json_text: str, output_path: str, injected_type: str):
         return
 
     # Inject the type manually at the front of each dictionary
-    items_with_type = [{"type": injected_type, **item} for item in items]
+    items_with_type = [{"type": injected_type, "physical_page": page_num, **item} for item in items]
 
-    # Convert list of dicts to list of lists
-    headers = list(items_with_type[0].keys())
+    # Use fixed schemas for each type to guarantee column ordering across pages
+    schemas = {
+        "question": ["type", "physical_page", "ocr_page", "question_no", "question", "exam_tags", "optionA", "optionB", "optionC", "optionD", "has_images"],
+        "answer": ["type", "physical_page", "ocr_page", "question_no", "has_images", "correct_option", "correct_option_text", "explanation"],
+        "chapter": ["type", "physical_page", "ocr_page", "chapter_no", "chapter_name"]
+    }
+    headers = schemas.get(injected_type)
+    if not headers:
+        headers = list(items_with_type[0].keys())
+
     rows = [headers]
     for item in items_with_type:
         rows.append([item.get(h, "") for h in headers])
@@ -286,9 +291,9 @@ def save_csvs(
     page_num:      int | None = None,
 ):
     """Save the JSON parts to CSV."""
-    _append_json_to_csv(questions_text, questions_path, "question")
-    _append_json_to_csv(answers_text,   answers_path, "answer")
-    _append_json_to_csv(chapters_text,  chapters_path, "chapter")
+    _append_json_to_csv(questions_text, questions_path, "question", page_num)
+    _append_json_to_csv(answers_text,   answers_path, "answer", page_num)
+    _append_json_to_csv(chapters_text,  chapters_path, "chapter", page_num)
     
     if raw_path and page_num is not None:
         _append_raw(questions_text, page_num, raw_path, "Questions")
@@ -326,15 +331,15 @@ if __name__ == "__main__":
     chapters_csv  = str(base) + "_chapters.csv"
     raw_csv       = str(pdf_path.parent / f"{pdf_path.stem}_raw.csv")
 
-    jpg_path = pdf_page_to_jpg(args.pdf, args.start)
-    print(f"[extract_page] Rendering page {args.start} -> {jpg_path}")
+    page_pdf_path = extract_pdf_page(args.pdf, args.start)
+    print(f"[extract_page] Extracting page {args.start} -> {page_pdf_path}")
     try:
-        questions_text, answers_text, chapters_text = generate(jpg_path, debug=args.debug)
+        questions_text, answers_text, chapters_text = generate(page_pdf_path, debug=args.debug)
         save_csvs(questions_text, answers_text, chapters_text, questions_csv, answers_csv, chapters_csv, raw_csv, args.start)
         print(f"[extract_page] Questions -> {questions_csv}")
         print(f"[extract_page] Answers   -> {answers_csv}")
         print(f"[extract_page] Chapters  -> {chapters_csv}")
         print(f"[extract_page] Raw audit -> {raw_csv}")
     finally:
-        if os.path.exists(jpg_path):
-            os.remove(jpg_path)
+        if os.path.exists(page_pdf_path):
+            os.remove(page_pdf_path)

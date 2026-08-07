@@ -267,12 +267,16 @@ if __name__ == "__main__":
     print(f"[process_ebook] Raw audit -> {raw_csv}")
 
     # ── Final Assembly ────────────────────────────────────────────────────────
-    print(f"\n[process_ebook] Assembling final question bank CSV...")
+    print(f"\n[process_ebook] Assigning chapters to CSVs...")
     import subprocess
     try:
         subprocess.run(
-            ["python", "generate_qbank.py", index_path],
+            ["python", "assign_chapters.py", index_path],
             check=True
         )
+        # subprocess.run(
+        #     ["python", "generate_qbank.py", index_path],
+        #     check=True
+        # )
     except subprocess.CalledProcessError as e:
-        print(f"[process_ebook] ✗ Failed to generate final question bank: {e}")
+        print(f"[process_ebook] ✗ Failed to assign chapters: {e}")
