@@ -102,7 +102,7 @@ def process_page(
         use_debug = debug and parallel == 1  # stream only when single
 
         t0 = time.perf_counter()
-        json_text = generate_page_json(temp_pdf_path, page_num, debug=use_debug)
+        json_text = generate_page_json(temp_pdf_path, page_num, debug=use_debug, progress_cb=progress_cb)
         _elapsed[0] = time.perf_counter() - t0
 
         # Save unified JSON to pages/page_{n}.json

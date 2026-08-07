@@ -99,7 +99,7 @@ def extract_pdf_page(pdf_path: str, page_number: int) -> str:
         
     return str(out_path)
 
-def generate_page_json(pdf_file_path: str, page_number: int, debug: bool = False) -> str:
+def generate_page_json(pdf_file_path: str, page_number: int, debug: bool = False, progress_cb=None) -> str:
     import time
     import random
     
@@ -132,6 +132,7 @@ def generate_page_json(pdf_file_path: str, page_number: int, debug: bool = False
     )
 
     t_start = time.perf_counter()
+    total_chars = 0
     if debug:
         print(f"\n--- Extracting Page {page_number} ---")
         
@@ -143,8 +144,25 @@ def generate_page_json(pdf_file_path: str, page_number: int, debug: bool = False
     ):
         if text := chunk.text:
             chunks.append(text)
+            total_chars += len(text)
             if debug:
                 print(text, end="", flush=True)
+            elif progress_cb:
+                elapsed = time.perf_counter() - t_start
+                cps = total_chars / elapsed if elapsed > 0 else 0
+                try:
+                    progress_cb(total_chars, cps, elapsed, done=False)
+                except Exception:
+                    # Don't let progress callback failures break extraction
+                    pass
+
+    elapsed = time.perf_counter() - t_start
+    if progress_cb:
+        cps = total_chars / elapsed if elapsed > 0 else 0
+        try:
+            progress_cb(total_chars, cps, elapsed, done=True)
+        except Exception:
+            pass
 
     if debug:
         print()
