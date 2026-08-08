@@ -2,12 +2,14 @@
 """Assemble per-page extraction JSON into a chapter-aware question bank."""
 
 import argparse
+import csv
 import json
 from pathlib import Path
 from typing import Any
 
 QBANK_SCHEMA = [
     "tenant", "exam", "images", "rating", "subject", "topic", "question",
+    "question_no", "page_no", "index",
     "optionA", "optionB", "optionC", "optionD", "correct_option",
     "correct_option_text", "explanation", "plan", "duration", "ext_links",
     "explanation_A", "explanation_B", "explanation_C", "explanation_D",
@@ -66,26 +68,34 @@ def assign_chapters(records: list[dict[str, Any]]) -> None:
 
 
 def make_qbank(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    questions = [r for r in records if r["type"] == "question"]
-    answers = [r for r in records if r["type"] == "answer"]
-    answer_map: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for answer in answers:
-        key = (answer.get("chapter_name", "").casefold(), str(answer.get("question_no", "")).strip())
-        answer_map.setdefault(key, []).append(answer)
-
-    used: set[int] = set()
     output = []
-    for question in questions:
+    used_answers: set[int] = set()
+    qbank_index = 0
+    for question_index, question in enumerate(records):
+        if question["type"] != "question":
+            continue
         key = (question.get("chapter_name", "").casefold(), str(question.get("question_no", "")).strip())
-        candidates = answer_map.get(key, [])
-        answer = next((a for a in candidates if id(a) not in used), None)
-        if answer is None:
-            # Handles -1/blank spillovers without attaching an answer twice.
-            answer = next((a for a in answers if id(a) not in used and a["page"] >= question["page"]), None)
-        if answer is not None:
-            used.add(id(answer))
+        # Answers are in reading order, but a split question/answer can place
+        # continuation records between the question and its answer. Search
+        # forward from this question and use the first unused answer with the
+        # same chapter and question number. This prevents repeated numbers in
+        # later sections from consuming an earlier answer.
+        start = question_index + 1
+        answer = None
+        for candidate in records[start:]:
+            if candidate["type"] != "answer":
+                continue
+            candidate_key = (candidate.get("chapter_name", "").casefold(),
+                             str(candidate.get("question_no", "")).strip())
+            if candidate_key == key and id(candidate) not in used_answers:
+                answer = candidate
+                used_answers.add(id(candidate))
+                break
         row = {field: "" for field in QBANK_SCHEMA}
         row.update({k: question.get(k, "") for k in ("question", "optionA", "optionB", "optionC", "optionD")})
+        row["question_no"] = question.get("question_no", "")
+        row["page_no"] = question.get("page", "")
+        row["index"] = qbank_index
         row["topic"] = question.get("chapter_name", "")
         row["tags"] = question.get("exam_tags", "")
         if answer:
@@ -93,6 +103,7 @@ def make_qbank(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for field in EMPTY_FIELDS:
             row[field] = ""
         output.append(row)
+        qbank_index += 1
     return output
 
 
@@ -120,11 +131,67 @@ def combine(pdf: str | Path) -> tuple[Path, Path]:
             record.pop("splitjoin", None)
     pages_out = pdf_path.parent / f"{pdf_path.stem}_pages.json"
     qbank_out = pdf_path.parent / f"{pdf_path.stem}_qbank.json"
+    qbank_csv_out = pdf_path.parent / f"{pdf_path.stem}_qbank.csv"
     qbank = make_qbank(records)
     pages_out.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     qbank_out.write_text(json.dumps(qbank, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    critical_indices = set(validate_answer_options(pdf_path, qbank, records))
+    with qbank_csv_out.open("w", encoding="utf-8", newline="") as handle:
+        csv_schema = [field for field in QBANK_SCHEMA if field not in {"question_no", "page_no", "index"}]
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=csv_schema,
+            quoting=csv.QUOTE_ALL,
+            escapechar="\\",
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        safe_rows = [
+            {
+                key: "".join(
+                    char for char in str(row.get(key, ""))
+                    if char in "\n\r\t" or ord(char) >= 32
+                )
+                for key in csv_schema
+            }
+            for row in qbank
+            if row["index"] not in critical_indices
+        ]
+        writer.writerows(safe_rows)
     validate(pages_out, qbank_out)
     return pages_out, qbank_out
+
+
+def validate_answer_options(pdf_path: Path, qbank: list[dict[str, Any]], records: list[dict[str, Any]]) -> list[int]:
+    """Record answer texts that do not occur among their question options."""
+    mismatches = []
+    seen_qnos = set()
+    question_records = [record for record in records if record["type"] == "question"]
+    for row_index, (row, question_record) in enumerate(zip(qbank, question_records)):
+        answer = str(row.get("correct_option_text", "")).strip()
+        if not answer:
+            continue
+        options = {
+            str(row.get(field, "")).strip().casefold()
+            for field in ("optionA", "optionB", "optionC", "optionD", "optionE")
+        }
+        if answer.casefold() not in options:
+            if row_index not in seen_qnos:
+                mismatches.append(row_index)
+                seen_qnos.add(row_index)
+            print(
+                "[combine_json] CRITICAL answer mismatch "
+                f"index={row_index}, qno={question_record.get('question_no', '')}: {row.get('question', '')} "
+                f"| answer={answer!r} | options={sorted(options - {''})}"
+            )
+
+    index_path = pdf_path.parent / f"{pdf_path.stem}_index.json"
+    if index_path.exists():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        index["critical_mismatched_answers"] = mismatches
+        index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"[combine_json] Critical mismatched answers: {mismatches}")
+    return mismatches
 
 
 def validate(pages_path: Path, qbank_path: Path) -> None:
