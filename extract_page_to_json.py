@@ -69,7 +69,7 @@ CRITICAL RULES:
    - DO NOT extract minor sub-headers (like 'Examination wise Questions', 'Solutions', or 'SSC CGL 2025 Tier - I') as chapters.
    - If no explicit chapter heading is present, simply don't add a chapter item.
 4. For Questions:
-   - Extract the full verbatim question text. Use Markdown for underlines/bold/tables.
+   - Extract the full verbatim question text. Use Markdown for underlines/bold/tables/etc.
    - "exam_tags" is the explicit exam metadata tag printed next to or below the question. Do NOT extract generic instructions.
    - "optionA", "optionB", "optionC", "optionD", "optionE" are the five answer options (text only, no numbering). OptionE may be empty.
    - "has_images" is true if the question has any images, diagrams, or figures.
