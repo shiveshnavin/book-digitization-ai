@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Allow importing extract_page from the same directory
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from extract_page_to_json import extract_pdf_page, generate_page_json
+from extract_page_to_json import extract_pdf_page, generate_page_json, mark_page_failed
 import time
 
 # ── Locks ─────────────────────────────────────────────────────────────────────
@@ -56,7 +56,14 @@ class SlotDisplay:
 def load_index(index_path: str) -> dict:
     if os.path.exists(index_path):
         with open(index_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            index = json.load(f)
+            # A page recorded as completed must not remain in the error list.
+            completed = set(index.get("completed", []))
+            index["failed"] = [
+                entry for entry in index.get("failed", [])
+                if entry.get("page") not in completed
+            ]
+            return index
     return {"completed": [], "failed": []}
 
 
@@ -128,10 +135,17 @@ def process_page(
             with _csv_lock:
                 with open(out_json_path, "w", encoding="utf-8") as f:
                     f.write(json_text)
+            mark_page_failed(index_path, page_num, "json parse failed: model returned invalid JSON")
+            raise ValueError("json parse failed: model returned invalid JSON")
 
         with _index_lock:
             if page_num not in index["completed"]:
                 index["completed"].append(page_num)
+            # Successful retries clear any stale failure for this page.
+            index["failed"] = [
+                entry for entry in index.get("failed", [])
+                if entry.get("page") != page_num
+            ]
             _write_index(index_path, index)
 
         _set(f"[OK] done in {_elapsed[0]:.1f}s")
@@ -237,15 +251,14 @@ if __name__ == "__main__":
     print(f"[process_ebook] Workers  : {args.parallel}")
 
     if not pages_to_process:
-        print("\n[process_ebook] Nothing left to do. All pages already completed.")
-        sys.exit(0)
+        print("\n[process_ebook] Nothing left to extract. Running assembly passes.")
 
     # ── Slot pool — each worker borrows a slot index while it runs ────────────
     slot_pool = Queue()
     for i in range(args.parallel):
         slot_pool.put(i)
 
-    display = SlotDisplay(args.parallel)
+    display = SlotDisplay(args.parallel) if pages_to_process else None
 
     done_count   = 0
     failed_count = 0
@@ -261,16 +274,18 @@ if __name__ == "__main__":
             slot_pool.put(slot)
 
     try:
-        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
-            futures = {executor.submit(run_page, p): p for p in pages_to_process}
-            for future in as_completed(futures):
-                _, success = future.result()
-                if success:
-                    done_count += 1
-                else:
-                    failed_count += 1
+        if pages_to_process:
+            with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+                futures = {executor.submit(run_page, p): p for p in pages_to_process}
+                for future in as_completed(futures):
+                    _, success = future.result()
+                    if success:
+                        done_count += 1
+                    else:
+                        failed_count += 1
     finally:
-        display.teardown()
+        if display:
+            display.teardown()
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n[process_ebook] Finished - [OK] {done_count} succeeded  [ERR] {failed_count} failed")
@@ -303,3 +318,13 @@ if __name__ == "__main__":
             )
     except subprocess.CalledProcessError as e:
         print(f"[process_ebook] ✗ Failed to extract pages to JSON: {e}")
+    else:
+        try:
+            subprocess.run(
+                [sys.executable, str(pathlib.Path(__file__).parent / "combine_json.py"), str(pdf_path)],
+                check=True,
+            )
+        except (subprocess.CalledProcessError, OSError) as exc:
+            # Keep run.sh moving across subjects, but never claim that this
+            # subject produced a valid bank when a page failed validation.
+            print(f"[process_ebook] ✗ JSON assembly/validation failed: {exc}")

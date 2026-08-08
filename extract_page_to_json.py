@@ -8,6 +8,19 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+def mark_page_failed(index_path: str, page: int, error: str) -> None:
+    path = pathlib.Path(index_path)
+    index = {"completed": [], "failed": []}
+    if path.exists():
+        try:
+            index = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+    index["completed"] = [p for p in index.get("completed", []) if p != page]
+    index["failed"] = [e for e in index.get("failed", []) if e.get("page") != page]
+    index["failed"].append({"page": page, "error": error})
+    path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+
 load_dotenv()
 _raw_keys = os.getenv("GEMINI_API_KEY")
 if not _raw_keys:
@@ -205,6 +218,12 @@ if __name__ == "__main__":
         except json.JSONDecodeError:
             with open(out_json_path, "w", encoding="utf-8") as f:
                 f.write(json_text)
+            mark_page_failed(
+                str(pdf_path.parent / f"{pdf_path.stem}_index.json"),
+                args.start,
+                "json parse failed: model returned invalid JSON",
+            )
+            raise ValueError("json parse failed: model returned invalid JSON")
                 
         print(f"[extract_page_to_json] Saved unified JSON -> {out_json_path}")
     finally:
