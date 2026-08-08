@@ -98,15 +98,26 @@ def make_qbank(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def combine(pdf: str | Path) -> tuple[Path, Path]:
     pdf_path = Path(pdf).resolve()
+    index_path = pdf_path.parent / f"{pdf_path.stem}_index.json"
+    if index_path.exists():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Cannot combine: invalid index JSON {index_path}: {exc}") from exc
+        failed = index.get("failed", [])
+        if failed:
+            pages = ", ".join(str(entry.get("page", "?")) for entry in failed)
+            raise ValueError(f"Cannot combine: index contains failed pages ({pages})")
     pages_dir = pdf_path.parent / "pages"
     pages = load_pages(pages_dir)
     records = flatten_contents(pages)
     assign_chapters(records)
     for record in records:
         if record["type"] in {"question", "answer"} and str(record.get("question_no", "")).strip() == "-1":
-            record["remarks"] = "splitjoin"
+            previous_page = max(1, record["page"] - 1)
+            record["splitjoin"] = f"{previous_page},{record['page']}"
         else:
-            record.pop("remarks", None)
+            record.pop("splitjoin", None)
     pages_out = pdf_path.parent / f"{pdf_path.stem}_pages.json"
     qbank_out = pdf_path.parent / f"{pdf_path.stem}_qbank.json"
     qbank = make_qbank(records)
