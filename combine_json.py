@@ -68,13 +68,17 @@ def assign_chapters(records: list[dict[str, Any]]) -> None:
 
 
 def make_qbank(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def normalize_chapter(value: Any) -> str:
+        return str(value or "").strip().casefold()
+
     output = []
     used_answers: set[int] = set()
     qbank_index = 0
     for question_index, question in enumerate(records):
         if question["type"] != "question":
             continue
-        key = (question.get("chapter_name", "").casefold(), str(question.get("question_no", "")).strip())
+        key = (normalize_chapter(question.get("chapter_name")),
+               str(question.get("question_no", "")).strip())
         # Answers are in reading order, but a split question/answer can place
         # continuation records between the question and its answer. Search
         # forward from this question and use the first unused answer with the
@@ -85,7 +89,7 @@ def make_qbank(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for candidate in records[start:]:
             if candidate["type"] != "answer":
                 continue
-            candidate_key = (candidate.get("chapter_name", "").casefold(),
+            candidate_key = (normalize_chapter(candidate.get("chapter_name")),
                              str(candidate.get("question_no", "")).strip())
             if candidate_key == key and id(candidate) not in used_answers:
                 answer = candidate
@@ -135,7 +139,10 @@ def combine(pdf: str | Path) -> tuple[Path, Path]:
     qbank = make_qbank(records)
     pages_out.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     qbank_out.write_text(json.dumps(qbank, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    critical_indices = set(validate_answer_options(pdf_path, qbank, records))
+    critical_indices = {
+        mismatch["index"]
+        for mismatch in validate_answer_options(pdf_path, qbank, records)
+    }
     with qbank_csv_out.open("w", encoding="utf-8", newline="") as handle:
         csv_schema = [field for field in QBANK_SCHEMA if field not in {"question_no", "page_no", "index"}]
         writer = csv.DictWriter(
@@ -165,7 +172,7 @@ def combine(pdf: str | Path) -> tuple[Path, Path]:
 def validate_answer_options(pdf_path: Path, qbank: list[dict[str, Any]], records: list[dict[str, Any]]) -> list[int]:
     """Record answer texts that do not occur among their question options."""
     mismatches = []
-    seen_qnos = set()
+    seen_indices = set()
     question_records = [record for record in records if record["type"] == "question"]
     for row_index, (row, question_record) in enumerate(zip(qbank, question_records)):
         answer = str(row.get("correct_option_text", "")).strip()
@@ -175,10 +182,26 @@ def validate_answer_options(pdf_path: Path, qbank: list[dict[str, Any]], records
             str(row.get(field, "")).strip().casefold()
             for field in ("optionA", "optionB", "optionC", "optionD", "optionE")
         }
-        if answer.casefold() not in options:
-            if row_index not in seen_qnos:
-                mismatches.append(row_index)
-                seen_qnos.add(row_index)
+        correct_option = str(row.get("correct_option", "")).strip().casefold()
+        normalized_option = correct_option.strip("()[]{}.")
+        option_index = {
+            "a": "optionA", "b": "optionB", "c": "optionC",
+            "d": "optionD", "e": "optionE",
+            "1": "optionA", "2": "optionB", "3": "optionC",
+            "4": "optionD", "5": "optionE",
+        }.get(normalized_option)
+        # In formats such as Spot the Error, correct_option_text is the
+        # corrected sentence fragment, while the option itself is only (1),
+        # (2), (3), etc. A valid option pointer is sufficient in that case.
+        option_pointer_is_valid = bool(option_index and str(row.get(option_index, "")).strip())
+        if answer.casefold() not in options and not option_pointer_is_valid:
+            if row_index not in seen_indices:
+                mismatches.append({
+                    "index": row_index,
+                    "question_no": question_record.get("question_no", ""),
+                    "page_no": question_record.get("page", ""),
+                })
+                seen_indices.add(row_index)
             print(
                 "[combine_json] CRITICAL answer mismatch "
                 f"index={row_index}, qno={question_record.get('question_no', '')}: {row.get('question', '')} "
