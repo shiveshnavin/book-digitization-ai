@@ -9,8 +9,8 @@ from typing import Any
 
 QBANK_SCHEMA = [
     "tenant", "exam", "images", "rating", "subject", "topic", "question",
-    "question_no", "page_no", "index",
-    "optionA", "optionB", "optionC", "optionD", "correct_option",
+    "question_no", "page_no", "answer_page_no", "index",
+    "optionA", "optionB", "optionC", "optionD", "optionE", "correct_option",
     "correct_option_text", "explanation", "plan", "duration", "ext_links",
     "explanation_A", "explanation_B", "explanation_C", "explanation_D",
     "creator_id", "creator_name", "tags",
@@ -67,6 +67,26 @@ def assign_chapters(records: list[dict[str, Any]]) -> None:
             record["chapter_name"] = active
 
 
+def merge_split_questions(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge question continuation records marked with question_no -1."""
+    merged: list[dict[str, Any]] = []
+    last_question: dict[str, Any] | None = None
+    for record in records:
+        if record["type"] == "question":
+            if str(record.get("question_no", "")).strip() == "-1" and last_question is not None:
+                continuation = str(record.get("question", "")).strip()
+                if continuation:
+                    original = str(last_question.get("question", "")).strip()
+                    last_question["question"] = f"{original}\n\n{continuation}" if original else continuation
+                for field in ("optionA", "optionB", "optionC", "optionD", "optionE", "exam_tags"):
+                    if not str(last_question.get(field, "")).strip() and str(record.get(field, "")).strip():
+                        last_question[field] = record[field]
+                continue
+            last_question = record
+        merged.append(record)
+    return merged
+
+
 def make_qbank(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     def normalize_chapter(value: Any) -> str:
         return str(value or "").strip().casefold()
@@ -96,9 +116,10 @@ def make_qbank(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 used_answers.add(id(candidate))
                 break
         row = {field: "" for field in QBANK_SCHEMA}
-        row.update({k: question.get(k, "") for k in ("question", "optionA", "optionB", "optionC", "optionD")})
+        row.update({k: question.get(k, "") for k in ("question", "optionA", "optionB", "optionC", "optionD", "optionE")})
         row["question_no"] = question.get("question_no", "")
         row["page_no"] = question.get("page", "")
+        row["answer_page_no"] = answer.get("page", "") if answer else ""
         row["index"] = qbank_index
         row["topic"] = question.get("chapter_name", "")
         row["tags"] = question.get("exam_tags", "")
@@ -127,6 +148,7 @@ def combine(pdf: str | Path) -> tuple[Path, Path]:
     pages = load_pages(pages_dir)
     records = flatten_contents(pages)
     assign_chapters(records)
+    records = merge_split_questions(records)
     for record in records:
         if record["type"] in {"question", "answer"} and str(record.get("question_no", "")).strip() == "-1":
             previous_page = max(1, record["page"] - 1)
@@ -137,6 +159,7 @@ def combine(pdf: str | Path) -> tuple[Path, Path]:
     qbank_out = pdf_path.parent / f"{pdf_path.stem}_qbank.json"
     qbank_csv_out = pdf_path.parent / f"{pdf_path.stem}_qbank.csv"
     qbank = make_qbank(records)
+    postprocess_option_e_answers(qbank)
     pages_out.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     qbank_out.write_text(json.dumps(qbank, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     critical_indices = {
@@ -144,7 +167,10 @@ def combine(pdf: str | Path) -> tuple[Path, Path]:
         for mismatch in validate_answer_options(pdf_path, qbank, records)
     }
     with qbank_csv_out.open("w", encoding="utf-8", newline="") as handle:
-        csv_schema = [field for field in QBANK_SCHEMA if field not in {"question_no", "page_no", "index"}]
+        csv_schema = [
+            field for field in QBANK_SCHEMA
+            if field not in {"question_no", "page_no", "answer_page_no", "index"}
+        ]
         writer = csv.DictWriter(
             handle,
             fieldnames=csv_schema,
@@ -167,6 +193,18 @@ def combine(pdf: str | Path) -> tuple[Path, Path]:
         writer.writerows(safe_rows)
     validate(pages_out, qbank_out)
     return pages_out, qbank_out
+
+
+def postprocess_option_e_answers(qbank: list[dict[str, Any]]) -> None:
+    """Normalize banks where an E/5 answer belongs in option D instead."""
+    for row in qbank:
+        if not str(row.get("optionE", "")).strip():
+            continue
+        answer = str(row.get("correct_option", "")).strip().casefold().strip("()[]{}.")
+        if answer not in {"e", "5"}:
+            continue
+        row["optionD"], row["optionE"] = row.get("optionE", ""), row.get("optionD", "")
+        row["correct_option"] = "4" if answer == "5" else "d"
 
 
 def validate_answer_options(pdf_path: Path, qbank: list[dict[str, Any]], records: list[dict[str, Any]]) -> list[int]:
@@ -200,20 +238,19 @@ def validate_answer_options(pdf_path: Path, qbank: list[dict[str, Any]], records
                     "index": row_index,
                     "question_no": question_record.get("question_no", ""),
                     "page_no": question_record.get("page", ""),
+                    "answer_page_no": row.get("answer_page_no", ""),
                 })
                 seen_indices.add(row_index)
-            print(
-                "[combine_json] CRITICAL answer mismatch "
-                f"index={row_index}, qno={question_record.get('question_no', '')}: {row.get('question', '')} "
-                f"| answer={answer!r} | options={sorted(options - {''})}"
-            )
 
     index_path = pdf_path.parent / f"{pdf_path.stem}_index.json"
     if index_path.exists():
         index = json.loads(index_path.read_text(encoding="utf-8"))
         index["critical_mismatched_answers"] = mismatches
         index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"[combine_json] Critical mismatched answers: {mismatches}")
+    print(
+        f"\n========== CRITICAL ANSWER MISMATCHES | {pdf_path.stem} | "
+        f"COUNT: {len(mismatches)} =========="
+    )
     return mismatches
 
 

@@ -210,6 +210,9 @@ if __name__ == "__main__":
     chapters_csv  = str(pdf_dir / f"{pdf_stem}_chapters.csv")
     raw_csv       = str(pdf_dir / f"{pdf_stem}_raw.csv")
     index_path    = str(pdf_dir / f"{pdf_stem}_index.json")
+    pages_json    = str(pdf_dir / f"{pdf_stem}_pages.json")
+    qbank_json    = str(pdf_dir / f"{pdf_stem}_qbank.json")
+    qbank_csv     = str(pdf_dir / f"{pdf_stem}_qbank.csv")
 
     # ── Load index & determine page range ─────────────────────────────────────
     index         = load_index(index_path)
@@ -217,10 +220,9 @@ if __name__ == "__main__":
     # Ensure index contains file paths
     index["files"] = {
         "original_pdf": str(pdf_path),
-        "questions_csv": questions_csv,
-        "answers_csv": answers_csv,
-        "chapters_csv": chapters_csv,
-        "raw_csv": raw_csv,
+        "pages_json": pages_json,
+        "qbank_json": qbank_json,
+        "qbank_csv": qbank_csv,
     }
     _write_index(index_path, index)
 
@@ -242,11 +244,6 @@ if __name__ == "__main__":
     print(f"[process_ebook] PDF      : {pdf_path.name}")
     print(f"[process_ebook] Pages    : {args.start}–{end_page}  ({total_pages} total in PDF)")
     print(f"[process_ebook] To do    : {len(pages_to_process)}  |  Skipped (done): {skipped}  |  Previously failed: {len(failed_set)}")
-    print(f"[process_ebook] Questions -> {questions_csv}")
-    print(f"[process_ebook] Answers   -> {answers_csv}")
-    print(f"[process_ebook] Chapters  -> {chapters_csv}")
-    print(f"[process_ebook] Raw audit -> {raw_csv}")
-
     print(f"[process_ebook] Index     : {index_path}")
     print(f"[process_ebook] Workers  : {args.parallel}")
 
@@ -294,11 +291,6 @@ if __name__ == "__main__":
         for entry in sorted(index["failed"], key=lambda e: e["page"]):
             print(f"                  page {entry['page']:>4} — {entry['error']}")
         print(f"[process_ebook] Re-run same command to retry failed pages.")
-    print(f"[process_ebook] Questions -> {questions_csv}")
-    print(f"[process_ebook] Answers   -> {answers_csv}")
-    print(f"[process_ebook] Chapters  -> {chapters_csv}")
-    print(f"[process_ebook] Raw audit -> {raw_csv}")
-
     # ── Final Assembly ────────────────────────────────────────────────────────
     print(f"\n[process_ebook] Assigning chapters to CSVs...")
     import subprocess

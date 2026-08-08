@@ -1,99 +1,66 @@
-# Manual Fix Prompt: Critical Mismatched Answers
+# Manual Fix: Critical Answer Mismatches
 
-You are correcting extracted question-and-answer data.
+Subject PDF:
 
-Subject directory:
-`<PATH_TO_SUBJECT_DIRECTORY>`
+`<PATH_TO_SUBJECT_DIRECTORY>/<BOOK>.pdf`
 
-PDF:
-`<PDF_FILENAME>`
+Follow these steps:
 
-The subject's index file contains:
-
-```json
-"critical_mismatched_answers": [
-  {
-    "index": <zero_based_qbank_index>,
-    "question_no": <question_number>,
-    "page_no": <source_pdf_page>
-  }
-]
-```
-
-For every object in `critical_mismatched_answers`:
-
-0. Before touching any source file, create a backup of the subject's `pages/` directory:
+1. Create a backup before editing anything:
 
    ```bash
    python backup_pages.py <PATH_TO_SUBJECT_DIRECTORY>
    ```
 
-   This creates or replaces:
+2. Generate focused instructions:
 
-   `<PATH_TO_SUBJECT_DIRECTORY>/pages.zip`
+   ```bash
+   python analyze_mismatches.py <PATH_TO_SUBJECT_DIRECTORY>/<BOOK>.pdf
+   ```
 
-   Confirm that the backup completes successfully before making any edits.
+3. Process one printed mismatch at a time. Use the exact:
 
-1. Open the corresponding source file:
+   - `pages/page_<N>.json` file paths
+   - line ranges
+   - question number
+   - question page
+   - answer page
+   - adjacent-page guidance
 
-   `<PATH_TO_SUBJECT_DIRECTORY>/pages/page_<page_no>.json`
+4. First inspect the indicated JSON ranges. If the JSON is unclear, inspect the PDF page numbers printed by the analyzer.
 
-2. Locate the question using its `question_no`, page number, and nearby record position.
+5. Edit only the exact `pages/page_<N>.json` record where the content starts:
 
-3. Inspect the original PDF page `<page_no>`, plus the adjacent one or two PDF pages if necessary. The PDF is authoritative.
+   - question content: edit the question-page record
+   - answer content: edit the answer-page record
 
-4. Identify the exact question text, all answer options, correct answer, correct option letter, and explanation if present.
+6. If content spills onto the adjacent page, copy the continuation into the starting record so it becomes complete. Then set the copied continuation fields on the adjacent-page record to empty strings (`""`). Do not delete the continuation record.
 
-5. Check nearby page JSON records for split content:
-
-   - `question_no: -1` may be a continuation of the question.
-   - An answer with `question_no: -1` may be a continuation of the answer.
-   - Preserve and merge split text correctly where required.
-
-6. Make surgical edits only to the affected source files:
-
-   `<PATH_TO_SUBJECT_DIRECTORY>/pages/page_<N>.json`
-
-   Do not regenerate the page files. Do not edit:
-
-   - `*_qbank.json`
-   - `*_qbank.csv`
-   - `*_pages.json`
-   - `*_index.json`
-   - CSV extraction files
-
-7. Preserve JSON formatting, record order, page and position values, chapter name, exam tags, unrelated questions and answers, and all fields that are already correct.
-
-8. Only change fields proven incorrect from the PDF. Typical fields include:
+7. Make only surgical corrections to fields proven by the PDF, such as:
 
    - `question`
    - `optionA`–`optionE`
    - `correct_option`
    - `correct_option_text`
    - `explanation`
-   - `question_no`, only if the PDF clearly proves it is wrong
+   - `question_no`, only when clearly wrong
 
-9. After each edit, verify:
+8. Preserve record order, formatting, page, position, chapter, tags, and unrelated data. Do not edit generated qbank, CSV, combined pages, or index files.
 
-   - `correct_option` is one of `a`, `b`, `c`, `d`, or `e`.
-   - `correct_option_text` matches one of the options, ignoring case and surrounding whitespace.
-   - The question and answer have the correct question number and chapter.
-   - No unrelated records changed.
+9. Never guess. If the PDF is unclear, leave the record unchanged and report it as unresolved.
 
-10. At the end, report a table containing:
+10. After all edits, regenerate the qbank and validation files:
 
-    - index
-    - question number
-    - page number
-    - source file edited
-    - fields changed
-    - old value
-    - new value
-    - brief PDF-based justification
+    ```bash
+    python process_ebook.py "<PATH_TO_SUBJECT_DIRECTORY>/<BOOK>.pdf" --parallel 5
+    ```
 
-Important:
+    Replace the PDF path with the actual subject PDF. For the English book, use:
 
-- Work one mismatch at a time.
-- Never guess an answer.
-- If the PDF is unclear, leave the record unchanged and report it as unresolved.
-- Do not remove a mismatch from the index manually. The index and qbank will be regenerated later from the edited page files.
+    ```bash
+    python process_ebook.py "/home/ubuntu/python/book-digitization-ai/qbank/english/ebp_p8_to_end.pdf" --parallel 5
+    ```
+
+11. Reopen the regenerated `<BOOK>_index.json` and check `critical_mismatched_answers` again. If entries remain, repeat the focused analysis and manual fixes. Do not manually remove entries from the index.
+
+12. Report each changed index, source file, changed fields, old value, new value, and PDF justification.
