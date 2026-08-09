@@ -189,6 +189,10 @@ def combine(pdf: str | Path) -> tuple[Path, Path]:
             }
             for row in qbank
             if row["index"] not in critical_indices
+            and all(str(row.get(field, "")).strip() for field in (
+                "topic", "question", "optionA", "optionB", "optionC", "optionD", 
+                "correct_option",
+            ))
         ]
         writer.writerows(safe_rows)
     validate(pages_out, qbank_out)
@@ -214,8 +218,6 @@ def validate_answer_options(pdf_path: Path, qbank: list[dict[str, Any]], records
     question_records = [record for record in records if record["type"] == "question"]
     for row_index, (row, question_record) in enumerate(zip(qbank, question_records)):
         answer = str(row.get("correct_option_text", "")).strip()
-        if not answer:
-            continue
         options = {
             str(row.get(field, "")).strip().casefold()
             for field in ("optionA", "optionB", "optionC", "optionD", "optionE")
@@ -232,7 +234,7 @@ def validate_answer_options(pdf_path: Path, qbank: list[dict[str, Any]], records
         # corrected sentence fragment, while the option itself is only (1),
         # (2), (3), etc. A valid option pointer is sufficient in that case.
         option_pointer_is_valid = bool(option_index and str(row.get(option_index, "")).strip())
-        if answer.casefold() not in options and not option_pointer_is_valid:
+        if not answer or (answer.casefold() not in options and not option_pointer_is_valid):
             if row_index not in seen_indices:
                 mismatches.append({
                     "index": row_index,
