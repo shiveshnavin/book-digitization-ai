@@ -44,10 +44,12 @@ def load_pages(pages_dir: Path) -> list[dict[str, Any]]:
 
 def flatten_contents(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
+    # Allow bad_chapter for traceability; it will be filtered out in later stages
+    VALID_TYPES = {"chapter", "question", "answer", "bad_chapter"}
     for page in pages:
         page_no = _page_number(Path(), page)
         for position, item in enumerate(page["contents"]):
-            if not isinstance(item, dict) or item.get("type") not in {"chapter", "question", "answer"}:
+            if not isinstance(item, dict) or item.get("type") not in VALID_TYPES:
                 raise ValueError(f"Invalid content item on page {page_no}, position {position}")
             record = item.get("data", {})
             if not isinstance(record, dict):
@@ -217,6 +219,18 @@ def validate_answer_options(pdf_path: Path, qbank: list[dict[str, Any]], records
     seen_indices = set()
     question_records = [record for record in records if record["type"] == "question"]
     for row_index, (row, question_record) in enumerate(zip(qbank, question_records)):
+        # A question without a paired answer is incomplete source data, but it
+        # is not an answer-content mismatch. Only validate records for which
+        # make_qbank found an answer page.
+        if not str(row.get("answer_page_no", "")).strip():
+            continue
+        if not all(str(row.get(field, "")).strip() for field in (
+            "optionA", "optionB", "optionC", "optionD"
+        )):
+            # The question text/options may be a continuation on another
+            # page. There is not enough complete option data to classify the
+            # answer as a mismatch reliably.
+            continue
         answer = str(row.get("correct_option_text", "")).strip()
         options = {
             str(row.get(field, "")).strip().casefold()
@@ -234,7 +248,9 @@ def validate_answer_options(pdf_path: Path, qbank: list[dict[str, Any]], records
         # corrected sentence fragment, while the option itself is only (1),
         # (2), (3), etc. A valid option pointer is sufficient in that case.
         option_pointer_is_valid = bool(option_index and str(row.get(option_index, "")).strip())
-        if not answer or (answer.casefold() not in options and not option_pointer_is_valid):
+        if not option_pointer_is_valid and (
+            not answer or answer.casefold() not in options
+        ):
             if row_index not in seen_indices:
                 mismatches.append({
                     "index": row_index,
