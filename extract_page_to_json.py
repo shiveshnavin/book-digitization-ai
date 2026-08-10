@@ -112,7 +112,120 @@ def extract_pdf_page(pdf_path: str, page_number: int) -> str:
         
     return str(out_path)
 
-def generate_page_json(pdf_file_path: str, page_number: int, debug: bool = False, progress_cb=None) -> str:
+def generate_page_json(
+    pdf_file_path: str,
+    page_number: int,
+    debug: bool = False,
+    progress_cb=None
+) -> str:
+    import time
+    import base64
+    import pathlib
+    from openai import OpenAI
+
+    file_bytes = pathlib.Path(pdf_file_path).read_bytes()
+    pdf_b64 = base64.b64encode(file_bytes).decode("utf-8")
+
+    client = OpenAI(
+        base_url="https://ai.semibit.in/openai/v1",
+        api_key="YOUR_BIFROST_API_KEY",
+    )
+
+    t_start = time.perf_counter()
+    total_chars = 0
+    chunks = []
+
+    if debug:
+        print(f"\n--- Extracting Page {page_number} ---")
+
+    stream = client.chat.completions.create(
+        model="gemini/gemma-4-31b-it",
+
+        messages=[
+            {
+                "role": "system",
+                "content": SYS_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Extract the content for page {page_number}.",
+                    },
+                    {
+                        "type": "file",
+                        "file": {
+                            "filename": "document.pdf",
+                            "file_data": f"data:application/pdf;base64,{pdf_b64}",
+                        },
+                    },
+                ],
+            },
+        ],
+
+        stream=True,
+
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "page_content",
+                "schema": PageContent.model_json_schema(),
+                "strict": True,
+            },
+        },
+    )
+
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+
+        text = chunk.choices[0].delta.content
+
+        if text:
+            chunks.append(text)
+            total_chars += len(text)
+
+            if debug:
+                print(text, end="", flush=True)
+
+            elif progress_cb:
+                elapsed = time.perf_counter() - t_start
+                cps = total_chars / elapsed if elapsed > 0 else 0
+
+                try:
+                    progress_cb(
+                        total_chars,
+                        cps,
+                        elapsed,
+                        done=False
+                    )
+                except Exception:
+                    pass
+
+    elapsed = time.perf_counter() - t_start
+
+    if progress_cb:
+        cps = total_chars / elapsed if elapsed > 0 else 0
+
+        try:
+            progress_cb(
+                total_chars,
+                cps,
+                elapsed,
+                done=True
+            )
+        except Exception:
+            pass
+
+    if debug:
+        print()
+
+    return "".join(chunks)
+
+
+# Deprecated: Use `generate_page_json` instead, which uses the OpenAI-compatible API.
+def generate_page_json_genai(pdf_file_path: str, page_number: int, debug: bool = False, progress_cb=None) -> str:
     import time
     import random
     
