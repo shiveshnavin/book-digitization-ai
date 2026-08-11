@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Allow importing extract_page from the same directory
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from extract_page_to_json import extract_pdf_page, generate_page_json, mark_page_failed
+from combine_json import write_qbank_csv
 import time
 
 # ── Locks ─────────────────────────────────────────────────────────────────────
@@ -222,6 +223,7 @@ if __name__ == "__main__":
         "original_pdf": str(pdf_path),
         "pages_json": pages_json,
         "qbank_json": qbank_json,
+        "qbank_final_json": str(pdf_dir / f"{pdf_stem}_qbank_final.json"),
         "qbank_csv": qbank_csv,
     }
     _write_index(index_path, index)
@@ -313,9 +315,25 @@ if __name__ == "__main__":
     else:
         try:
             subprocess.run(
-                [sys.executable, str(pathlib.Path(__file__).parent / "combine_json.py"), str(pdf_path)],
+                [sys.executable, str(pathlib.Path(__file__).parent / "combine_json.py"), "--skip-csv", str(pdf_path)],
                 check=True,
             )
+            print(f"[process_ebook] Assembled JSON and CSVs for {pdf_path.name}. Now running final verification...")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(pathlib.Path(__file__).parent / "scripts" / "final_verify_qbank.py"),
+                    str(pdf_path),
+                    "--parallel",
+                    str(args.parallel),
+                    "--openai"
+                ],
+                check=True,
+            )
+            final_qbank_path = pdf_dir / f"{pdf_stem}_qbank_final.json"
+            final_qbank = json.loads(final_qbank_path.read_text(encoding="utf-8"))
+            pages_out = json.loads((pdf_dir / f"{pdf_stem}_pages.json").read_text(encoding="utf-8"))
+            write_qbank_csv(pdf_path, final_qbank, pathlib.Path(qbank_csv), pages_out)
         except (subprocess.CalledProcessError, OSError) as exc:
             # Keep run.sh moving across subjects, but never claim that this
             # subject produced a valid bank when a page failed validation.

@@ -134,7 +134,7 @@ def make_qbank(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return output
 
 
-def combine(pdf: str | Path) -> tuple[Path, Path]:
+def combine(pdf: str | Path, write_csv: bool = True) -> tuple[Path, Path]:
     pdf_path = Path(pdf).resolve()
     index_path = pdf_path.parent / f"{pdf_path.stem}_index.json"
     if index_path.exists():
@@ -164,39 +164,8 @@ def combine(pdf: str | Path) -> tuple[Path, Path]:
     postprocess_option_e_answers(qbank)
     pages_out.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     qbank_out.write_text(json.dumps(qbank, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    critical_indices = {
-        mismatch["index"]
-        for mismatch in validate_answer_options(pdf_path, qbank, records)
-    }
-    with qbank_csv_out.open("w", encoding="utf-8", newline="") as handle:
-        csv_schema = [
-            field for field in QBANK_SCHEMA
-            if field not in {"question_no", "page_no", "answer_page_no", "index"}
-        ]
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=csv_schema,
-            quoting=csv.QUOTE_ALL,
-            escapechar="\\",
-            lineterminator="\n",
-        )
-        writer.writeheader()
-        safe_rows = [
-            {
-                key: "".join(
-                    char for char in str(row.get(key, ""))
-                    if char in "\n\r\t" or ord(char) >= 32
-                )
-                for key in csv_schema
-            }
-            for row in qbank
-            if row["index"] not in critical_indices
-            and all(str(row.get(field, "")).strip() for field in (
-                "topic", "question", "optionA", "optionB", "optionC", "optionD", 
-                "correct_option",
-            ))
-        ]
-        writer.writerows(safe_rows)
+    if write_csv:
+        write_qbank_csv(pdf_path, qbank, qbank_csv_out, records)
     validate(pages_out, qbank_out)
     return pages_out, qbank_out
 
@@ -283,10 +252,59 @@ def validate(pages_path: Path, qbank_path: Path) -> None:
         raise ValueError(f"{qbank_path} has non-empty reserved fields")
 
 
+def write_qbank_csv(
+    pdf_path: Path,
+    qbank: list[dict[str, Any]],
+    qbank_csv_out: Path,
+    records: list[dict[str, Any]] | None = None,
+) -> Path:
+    critical_indices: set[int] = set()
+    if records is not None:
+        critical_indices = {
+            mismatch["index"]
+            for mismatch in validate_answer_options(pdf_path, qbank, records)
+        }
+    with qbank_csv_out.open("w", encoding="utf-8", newline="") as handle:
+        csv_schema = [
+            field for field in QBANK_SCHEMA
+            if field not in {"question_no", "page_no", "answer_page_no", "index"}
+        ]
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=csv_schema,
+            quoting=csv.QUOTE_ALL,
+            escapechar="\\",
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        safe_rows = [
+            {
+                key: "".join(
+                    char for char in str(row.get(key, ""))
+                    if char in "\n\r\t" or ord(char) >= 32
+                )
+                for key in csv_schema
+            }
+            for row in qbank
+            if row["index"] not in critical_indices
+            and all(str(row.get(field, "")).strip() for field in (
+                "topic", "question", "optionA", "optionB", "optionC", "optionD",
+                "correct_option",
+            ))
+        ]
+        writer.writerows(safe_rows)
+    return qbank_csv_out
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("pdf", help="PDF whose pages/page_*.json files should be assembled")
+    parser.add_argument(
+        "--skip-csv",
+        action="store_true",
+        help="Write *_qbank.json but skip *_qbank.csv generation",
+    )
     args = parser.parse_args()
-    pages_file, qbank_file = combine(args.pdf)
+    pages_file, qbank_file = combine(args.pdf, write_csv=not args.skip_csv)
     print(f"[combine_json] Pages -> {pages_file}")
     print(f"[combine_json] Qbank -> {qbank_file}")
