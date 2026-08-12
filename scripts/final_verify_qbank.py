@@ -1,9 +1,11 @@
 """Verify and, when necessary, correct every question in a generated QBank."""
 
 import argparse
+import importlib.util
 import json
 import os
 import random
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -465,6 +467,30 @@ def main(pdf_arg: str, parallel: int, use_openai: bool = False) -> None:
             final_questions.append(corrected)
         else:
             final_questions.append(dict(question))
+
+    manual_py = pdf_path.parent / "manual.py"
+    if manual_py.is_file():
+        parent_dir = str(pdf_path.parent)
+        added_to_path = False
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+            added_to_path = True
+        try:
+            spec = importlib.util.spec_from_file_location("manual_module", manual_py)
+            if spec and spec.loader:
+                manual_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(manual_module)
+                if hasattr(manual_module, "manual_process"):
+                    print(f"Executing manual_process from {manual_py}")
+                    res = manual_module.manual_process(final_questions)
+                    if res is not None:
+                        final_questions = res
+        except Exception as exc:
+            print(f"Failed to run manual_process from {manual_py}: {exc}")
+        finally:
+            if added_to_path:
+                sys.path.remove(parent_dir)
+
     final_path = final_qbank_path_for(pdf_path)
     write_json_atomic(final_path, final_questions)
     print(f"Done. Cache: {cache_path}")
