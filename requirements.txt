@@ -4,3 +4,9 @@ pdf2image
 pypdf
 pydantic
 Pillow
+opencv-python
+PyMuPDF
+pytesseract
+doclayout-yolo
+huggingface-hub
+pdf2image
