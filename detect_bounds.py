@@ -163,7 +163,7 @@ def process_page_worker(page_num, image, pdf_path, model, output_dir, images_dir
     img_cv = cv2.imread(temp_raw_path)
     page_h, page_w = img_cv.shape[:2]
 
-    results = model.predict(temp_raw_path, imgsz=1024, conf=CONF_THRESHOLD, device="cpu", verbose=False)
+    results = model.predict(temp_raw_path, imgsz=1024, conf=CONF_THRESHOLD,  device="cpu",verbose=False)
 
     # 1. Gather all raw boxes
     raw_boxes_data = []
@@ -180,7 +180,7 @@ def process_page_worker(page_num, image, pdf_path, model, output_dir, images_dir
         })
 
     # 2. Filter out heavily overlapping smaller boxes
-    filtered_boxes = filter_overlapping_boxes(raw_boxes_data, overlap_threshold=0.8)
+    filtered_boxes = filter_overlapping_boxes(raw_boxes_data, overlap_threshold=1.0)
 
     # 3. Extract text and crop the image for kept boxes
     page_elements = []
@@ -235,27 +235,37 @@ def process_page_worker(page_num, image, pdf_path, model, output_dir, images_dir
     return page_num, page_elements, page_h
 
 # ============================================================
-# Main Execution
+# Importable API + Main Execution
 # ============================================================
-def main():
-    parser = argparse.ArgumentParser(description="Extract layout and text from a PDF.")
-    parser.add_argument("pdf_path", help="Path to the input PDF file")
-    parser.add_argument("--parallel", type=int, default=1, 
-                        help="Number of pages to process in parallel (e.g., set to your CPU core count. Default is 1).")
-    args = parser.parse_args()
+def process_pdf(pdf_path, parallel=1, force=False):
+    """Process a PDF: detect layout bounds, extract text/crops.
 
-    pdf_path = args.pdf_path
+    Can be imported and called directly:
+        from detect_bounds import process_pdf
+        process_pdf(r"path\to\file.pdf", parallel=4)
+
+    Returns the JSON output path on success, or None if skipped/failed.
+    """
     if not os.path.exists(pdf_path):
         print(f"Error: File not found -> {pdf_path}")
-        return
+        return None
 
     # Generate Output Paths
     pdf_dir = os.path.dirname(os.path.abspath(pdf_path))
     pdf_basename = os.path.splitext(os.path.basename(pdf_path))[0]
-    
+
     output_dir = os.path.join(pdf_dir, f"{pdf_basename}_page_bounds")
     images_dir = os.path.join(pdf_dir, f"{pdf_basename}_images")
     json_output_path = os.path.join(pdf_dir, f"{pdf_basename}_detected.json")
+
+    # Skip if output already exists AND is non-empty (unless force=True)
+    if (not force
+            and os.path.exists(output_dir)
+            and any(os.scandir(output_dir))
+            and os.path.exists(json_output_path)):
+        print(f"Output already exists for {pdf_basename}, skipping. Use force=True to reprocess.")
+        print(f"Existing: {output_dir}")
+        return None
 
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(images_dir, exist_ok=True)
@@ -279,9 +289,9 @@ def main():
     # ---------------------------------------------------------
     # Parallel Page Processing Phase
     # ---------------------------------------------------------
-    print(f"\nProcessing {total_pages} pages using {args.parallel} thread(s)...")
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as executor:
+    print(f"\nProcessing {total_pages} pages using {parallel} thread(s)...")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as executor:
         futures = {
             executor.submit(process_page_worker, page_num, image, pdf_path, model, output_dir, images_dir): page_num
             for page_num, image in enumerate(pages_img)
@@ -333,11 +343,18 @@ def main():
             # Construct final filename: <page>_<index>_<type>.jpg
             final_img_filename = f"{el['page']}_{global_index}_{safe_type}.jpg"
             final_img_path = os.path.join(images_dir, final_img_filename)
-            
-            # Check if temp image exists, then rename it to final name
+
+            # If the file already exists (e.g. from a previous run),
+            # add a random suffix instead of overwriting
+            if os.path.exists(final_img_path):
+                stem, ext = os.path.splitext(final_img_filename)
+                final_img_filename = f"{stem}_{uuid.uuid4().hex[:8]}{ext}"
+                final_img_path = os.path.join(images_dir, final_img_filename)
+
+            # Check if temp image exists, then move it to final name
             tmp_path = el.get("_tmp_img_path")
             if tmp_path and os.path.exists(tmp_path):
-                os.rename(tmp_path, final_img_path)
+                os.replace(tmp_path, final_img_path)
                 # Store relative path so your JSON stays portable
                 el["image"] = f"{pdf_basename}_images/{final_img_filename}"
             else:
@@ -364,6 +381,79 @@ def main():
     print(f"Layout data saved to: {json_output_path}")
     print(f"Annotated bounds images saved in: {output_dir}")
     print(f"Extracted crop images saved in: {images_dir}")
+
+    return json_output_path
+
+
+def detect_postprocess(pdf_path, function):
+    """Apply a post-processing function to each chapter JSON for a PDF.
+
+    If pdf_path points to a book PDF, processes every
+    <pdf_dir>/chapters/<name>_detected.json file.
+    If pdf_path points to a chapter PDF inside a `chapters` directory,
+    only that chapter's own <name>_detected.json is processed.
+    Calls `function(chapter_name, elements)` and overwrites each JSON
+    with the returned value.
+
+    Returns the list of processed file paths.
+    """
+    pdf_dir = os.path.dirname(os.path.abspath(pdf_path))
+    if os.path.basename(pdf_dir).lower() == "chapters":
+        # A single chapter PDF -> process only its own JSON
+        stem = os.path.splitext(os.path.basename(pdf_path))[0]
+        json_output_path = os.path.join(pdf_dir, f"{stem}_detected.json")
+        if not os.path.exists(json_output_path):
+            print(f"No matching JSON found: {json_output_path}")
+            return []
+        target_files = [json_output_path]
+    else:
+        chapters_dir = os.path.join(pdf_dir, "chapters")
+        if not os.path.isdir(chapters_dir):
+            print(f"No chapters directory found: {chapters_dir}")
+            return []
+        target_files = [
+            os.path.join(chapters_dir, f)
+            for f in sorted(os.listdir(chapters_dir))
+            if f.endswith("_detected.json")
+        ]
+
+    processed = []
+    for file_path in target_files:
+        filename = os.path.basename(file_path)
+        chapter_name = filename[: -len("_detected.json")]
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                elements = json.load(f)
+
+            updated = function(chapter_name, elements)
+
+            if updated is None:
+                print(f"Skipped (no result returned): {filename}")
+                continue
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(updated, f, indent=4, ensure_ascii=False)
+
+            processed.append(file_path)
+            print(f"Post-processed: {filename}")
+        except Exception as e:
+            print(f"Error post-processing {filename}: {e}")
+
+    return processed
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Extract layout and text from a PDF.")
+    parser.add_argument("pdf_path", help="Path to the input PDF file")
+    parser.add_argument("--parallel", type=int, default=1,
+                        help="Number of pages to process in parallel (e.g., set to your CPU core count. Default is 1).")
+    parser.add_argument("--force", action="store_true",
+                        help="Force reprocessing even if output folder exists")
+    args = parser.parse_args()
+
+    process_pdf(args.pdf_path, parallel=args.parallel, force=args.force)
+
 
 if __name__ == "__main__":
     main()
